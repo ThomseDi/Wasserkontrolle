@@ -1,0 +1,58 @@
+[platformio]
+default_envs = master
+
+; ===== Master: ESP32 #1 mit Display + Touch =====
+[env:master]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+upload_speed = 115200
+upload_port = COM12
+monitor_port = COM12
+build_src_filter = -<*> +<main.cpp>
+
+lib_deps =
+  bodmer/TFT_eSPI
+
+build_flags =
+  -D USER_SETUP_LOADED=1
+
+  ; Display Treiber
+  -D ILI9341_DRIVER=1
+
+  ; Display Größe
+  -D TFT_WIDTH=240
+  -D TFT_HEIGHT=320
+
+  ; SPI Pins Display
+  -D TFT_MISO=12
+  -D TFT_MOSI=13
+  -D TFT_SCLK=14
+  -D TFT_CS=15
+  -D TFT_DC=2
+  -D TFT_RST=4
+
+  ; Fonts
+  -D LOAD_GLCD=1
+  -D LOAD_FONT2=1
+  -D LOAD_FONT4=1
+  -D LOAD_GFXFF=1
+
+  ; Geschwindigkeit
+  -D SPI_FREQUENCY=27000000
+  -D SPI_READ_FREQUENCY=20000000
+
+  ; Touch
+  -D TOUCH_CS=33
+
+; ===== Slave: ESP32 #2, #3, #4 =====
+[env:slave]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+upload_speed = 115200
+upload_port = COM4
+monitor_port = COM4
+build_src_filter = -<*> +<slave.cpp>

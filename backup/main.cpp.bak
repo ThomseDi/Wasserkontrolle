@@ -1,0 +1,286 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <TFT_eSPI.h>
+
+#define TFT_BL 21
+
+// ===== WLAN Zugangsdaten =====
+const char* ssid     = "6360Achalmstr";
+const char* wlanPass = "mostkrug2011";
+
+TFT_eSPI tft = TFT_eSPI();
+WebServer server(80);
+
+// ===== MAC-Adressen der Peers =====
+uint8_t mac_haupt[]    = {0xE0, 0x8C, 0xFE, 0x58, 0x5D, 0x7C}; // ESP32 #2
+uint8_t mac_entkalker[] = {0xE0, 0x8C, 0xFE, 0x59, 0x59, 0x94}; // ESP32 #3
+uint8_t mac_offen[]    = {0xE0, 0x8C, 0xFE, 0xB6, 0xEB, 0x34}; // ESP32 #4
+
+// ===== Peer-Status =====
+struct PeerInfo {
+  const char* name;
+  uint8_t* mac;
+  bool online;
+};
+
+PeerInfo peers[3] = {
+  {"ESP32 #2 Hauptwasseruhr",  mac_haupt,    false},
+  {"ESP32 #3 Entkalkeruhr",    mac_entkalker, false},
+  {"ESP32 #4 (offen)", mac_offen,    false}
+};
+
+// ===== ESP-NOW Sende-Callback =====
+void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
+  for (int i = 0; i < 3; i++) {
+    if (memcmp(mac, peers[i].mac, 6) == 0) {
+      peers[i].online = (status == ESP_NOW_SEND_SUCCESS);
+    }
+  }
+}
+
+// ===== WiFi-Kanal ermitteln =====
+uint8_t getWiFiChannel() {
+  uint8_t primaryChan = 0;
+  wifi_second_chan_t secondChan;
+  esp_wifi_get_channel(&primaryChan, &secondChan);
+  return primaryChan;
+}
+
+// ===== Peer registrieren =====
+void addPeer(uint8_t *mac) {
+  esp_now_peer_info_t info = {};
+  memcpy(info.peer_addr, mac, 6);
+  info.channel = getWiFiChannel();  // gleicher Kanal wie Router
+  info.encrypt = false;
+  esp_now_add_peer(&info);
+}
+
+// ===== Display: Kopfzeile (einmalig) =====
+void drawHeader() {
+  tft.fillScreen(TFT_BLACK);
+
+  // Titel
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("ESP-NOW Status", 160, 8);
+
+  tft.drawFastHLine(0, 38, 320, TFT_DARKGREY);
+
+  // Peer-Namen und MAC-Adressen
+  tft.setTextDatum(TL_DATUM);
+  for (int i = 0; i < 3; i++) {
+    int y = 48 + i * 65;
+
+    // Name
+    tft.setTextFont(2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(peers[i].name, 10, y);
+
+    // MAC-Adresse
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+      peers[i].mac[0], peers[i].mac[1], peers[i].mac[2],
+      peers[i].mac[3], peers[i].mac[4], peers[i].mac[5]);
+    tft.setTextFont(1);
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString(macStr, 10, y + 22);
+
+    // Trennlinie
+    if (i < 2) tft.drawFastHLine(10, y + 55, 300, TFT_DARKGREY);
+  }
+}
+
+// ===== Display: Status aktualisieren =====
+void updateStatus() {
+  tft.setTextDatum(TL_DATUM);
+  for (int i = 0; i < 3; i++) {
+    int y = 48 + i * 65;
+    uint16_t color = peers[i].online ? TFT_GREEN : TFT_RED;
+
+    // Status-Kreis
+    tft.fillCircle(285, y + 8, 9, color);
+
+    // Status-Text
+    tft.fillRect(260, y + 22, 60, 14, TFT_BLACK);
+    tft.setTextFont(1);
+    tft.setTextColor(color, TFT_BLACK);
+    tft.drawString(peers[i].online ? "ONLINE" : "OFFLINE", 260, y + 24);
+  }
+}
+
+// ===== Webserver: HTML-Seite =====
+void handleRoot() {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="refresh" content="5">
+  <title>WasserKontrolle</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
+    h1 { text-align: center; color: #00d4ff; }
+    .container { max-width: 600px; margin: 0 auto; }
+    .peer { background: #16213e; border-radius: 10px; padding: 15px 20px; margin: 12px 0;
+            display: flex; justify-content: space-between; align-items: center;
+            border-left: 4px solid #444; }
+    .peer.online { border-left-color: #00ff88; }
+    .peer.offline { border-left-color: #ff4444; }
+    .peer-name { font-size: 1.1em; font-weight: bold; }
+    .peer-mac { font-size: 0.8em; color: #888; margin-top: 4px; }
+    .status { font-size: 0.95em; font-weight: bold; padding: 6px 14px; border-radius: 20px; }
+    .status.online { background: #00ff8833; color: #00ff88; }
+    .status.offline { background: #ff444433; color: #ff4444; }
+    .footer { text-align: center; color: #555; margin-top: 30px; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>&#128167; WasserKontrolle</h1>
+)rawliteral";
+
+  for (int i = 0; i < 3; i++) {
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+      peers[i].mac[0], peers[i].mac[1], peers[i].mac[2],
+      peers[i].mac[3], peers[i].mac[4], peers[i].mac[5]);
+
+    const char* cls = peers[i].online ? "online" : "offline";
+    const char* txt = peers[i].online ? "ONLINE" : "OFFLINE";
+
+    html += "<div class='peer ";
+    html += cls;
+    html += "'><div><div class='peer-name'>";
+    html += peers[i].name;
+    html += "</div><div class='peer-mac'>MAC: ";
+    html += macStr;
+    html += "</div></div><span class='status ";
+    html += cls;
+    html += "'>";
+    html += txt;
+    html += "</span></div>";
+  }
+
+  html += R"rawliteral(
+    <div class="footer">Automatische Aktualisierung alle 5 Sekunden</div>
+  </div>
+</body>
+</html>
+)rawliteral";
+
+  server.send(200, "text/html", html);
+}
+
+// ===== SETUP =====
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Display
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+  tft.init();
+  tft.setRotation(1);
+
+  // WiFi im AP+STA Modus (für ESP-NOW + WLAN gleichzeitig)
+  WiFi.mode(WIFI_AP_STA);
+
+  // Mit WLAN verbinden
+  Serial.printf("Verbinde mit WLAN: %s\n", ssid);
+  WiFi.begin(ssid, wlanPass);
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("Verbinde mit WLAN...", 160, 120);
+
+  int timeout = 0;
+  while (WiFi.status() != WL_CONNECTED && timeout < 20) {
+    delay(500);
+    Serial.print(".");
+    timeout++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\nWLAN verbunden! IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("\nWLAN-Verbindung fehlgeschlagen!");
+  }
+
+  // ESP-NOW initialisieren
+  Serial.println("\n=== ESP-NOW Master ===");
+  Serial.print("Eigene MAC: ");
+  Serial.println(WiFi.macAddress());
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW Init Fehler!");
+    tft.fillScreen(TFT_RED);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextFont(4);
+    tft.setTextColor(TFT_WHITE, TFT_RED);
+    tft.drawString("ESP-NOW FEHLER!", 160, 120);
+    return;
+  }
+
+  esp_now_register_send_cb(onDataSent);
+
+  addPeer(mac_haupt);
+  addPeer(mac_entkalker);
+  addPeer(mac_offen);
+
+  Serial.printf("ESP-NOW bereit, 3 Peers registriert (Kanal %d)\n", getWiFiChannel());
+
+  // Webserver starten
+  server.on("/", handleRoot);
+  server.begin();
+  Serial.println("Webserver gestartet auf Port 80");
+
+  drawHeader();
+
+  // IP-Adresse auf Display anzeigen
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextFont(2);
+  if (WiFi.status() == WL_CONNECTED) {
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("IP: " + WiFi.localIP().toString(), 160, 225);
+  } else {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("WLAN nicht verbunden!", 160, 225);
+  }
+
+  updateStatus();
+}
+
+// ===== LOOP =====
+void loop() {
+  // Webserver-Anfragen bearbeiten
+  server.handleClient();
+
+  // Ping an alle Peers senden
+  uint8_t ping = 1;
+  for (int i = 0; i < 3; i++) {
+    esp_now_send(peers[i].mac, &ping, sizeof(ping));
+    delay(50);
+  }
+
+  // Kurz warten auf Callbacks
+  delay(200);
+
+  // Display aktualisieren
+  updateStatus();
+
+  // Serial-Ausgabe
+  for (int i = 0; i < 3; i++) {
+    Serial.printf("%s: %s\n", peers[i].name, peers[i].online ? "ONLINE" : "OFFLINE");
+  }
+  Serial.println("---");
+
+  delay(3000);
+}

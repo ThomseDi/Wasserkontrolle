@@ -1,0 +1,549 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include <WebServer.h>
+#include <time.h>
+#include <SPI.h>
+#include <SD.h>
+#include <TFT_eSPI.h>
+
+// Touch Pins (VSPI) - exakt wie im Wasseruhr-Backup
+#define TOUCH_CS_PIN  33
+#define TOUCH_IRQ  36
+#define TOUCH_MOSI 32
+#define TOUCH_MISO 39
+#define TOUCH_CLK  25
+
+// SPI-Trick: XPT2046 auf VSPI umleiten (exakt wie im Wasseruhr-Backup)
+SPIClass touchSPI(VSPI);
+#define SPI touchSPI
+#include <XPT2046_Touchscreen.h>
+#undef SPI
+
+#define TFT_BL 21
+#define SD_CS  5   // SD-Karte Chip-Select
+
+// ===== WLAN Zugangsdaten =====
+const char* ssid     = "6360Achalmstr";
+const char* wlanPass = "mostkrug2011";
+
+TFT_eSPI tft = TFT_eSPI();
+XPT2046_Touchscreen ts(TOUCH_CS_PIN, 255);
+SPIClass sdSPI(HSPI);  // SD-Karte auf eigenem HSPI-Bus
+WebServer server(80);
+bool sdOK = false;
+bool showLog = false;  // true = SD-Log-Ansicht, false = Hauptansicht
+bool lastTouched = false;  // Entprellung
+unsigned long lastTouch = 0;
+
+// Touch-Kalibrierung
+int16_t calX0 = 300, calY0 = 300;
+int16_t calX1 = 3800, calY1 = 3800;
+
+// ===== Touch lesen =====
+bool getTouch(int &tx, int &ty) {
+  TS_Point p = ts.getPoint();
+  bool touched = (p.z >= 400);
+  
+  // Ungueltige Werte filtern (8191 = kein echter Touch)
+  if (p.x >= 8000 || p.y >= 8000 || p.x <= 100 || p.y <= 100) touched = false;
+  
+  if (touched && !lastTouched) {
+    Serial.printf("Touch RAW: x=%d, y=%d, z=%d\n", p.x, p.y, p.z);
+    tx = map(p.x, calX0, calX1, 0, 319);
+    ty = map(p.y, calY0, calY1, 0, 239);
+    tx = constrain(tx, 0, 319);
+    ty = constrain(ty, 0, 239);
+    lastTouched = true;
+    return true;
+  }
+  if (!touched) lastTouched = false;
+  return false;
+}
+
+// ===== MAC-Adressen der Peers =====
+uint8_t mac_haupt[]    = {0xE0, 0x8C, 0xFE, 0x58, 0x5D, 0x7C}; // ESP32 #2
+uint8_t mac_entkalker[] = {0xE0, 0x8C, 0xFE, 0x59, 0x59, 0x94}; // ESP32 #3
+uint8_t mac_offen[]    = {0xE0, 0x8C, 0xFE, 0xB6, 0xEB, 0x34}; // ESP32 #4
+
+// ===== Peer-Status =====
+struct PeerInfo {
+  const char* name;
+  uint8_t* mac;
+  bool online;
+  uint32_t zaehler;     // Liter-Zählerstand
+  bool neuerWert;       // Flag: neuer Wert empfangen
+};
+
+PeerInfo peers[3] = {
+  {"ESP32 #2 Hauptwasseruhr",  mac_haupt,    false, 0, false},
+  {"ESP32 #3 Entkalkeruhr",    mac_entkalker, false, 0, false},
+  {"ESP32 #4 (offen)", mac_offen,    false, 0, false}
+};
+
+// ===== Datenpaket (muss auf Slave identisch sein) =====
+struct WasserDaten {
+  uint8_t  peerID;      // 2=Hauptwasseruhr, 3=Entkalker, 4=offen
+  uint32_t zaehler;     // Liter-Zählerstand
+};
+
+// ===== ESP-NOW Sende-Callback =====
+void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
+  for (int i = 0; i < 3; i++) {
+    if (memcmp(mac, peers[i].mac, 6) == 0) {
+      peers[i].online = (status == ESP_NOW_SEND_SUCCESS);
+    }
+  }
+}
+
+// ===== SD-Karte: Zählerstand mit Zeitstempel speichern =====
+void logToSD(int peerIdx, uint32_t zaehler) {
+  if (!sdOK) return;
+
+  struct tm timeinfo;
+  char zeitBuf[30] = "kein NTP";
+  if (getLocalTime(&timeinfo)) {
+    strftime(zeitBuf, sizeof(zeitBuf), "%d.%m.%Y %H:%M:%S", &timeinfo);
+  }
+
+  File f = SD.open("/wasserlog.csv", FILE_APPEND);
+  if (f) {
+    f.printf("%s;%s;%lu\n", zeitBuf, peers[peerIdx].name, zaehler);
+    f.close();
+    Serial.printf("SD Log: %s | %s | %lu L\n", zeitBuf, peers[peerIdx].name, zaehler);
+  } else {
+    Serial.println("SD Schreibfehler!");
+  }
+}
+
+// ===== ESP-NOW Empfangs-Callback (Daten von Slaves) =====
+void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
+  if (len == sizeof(WasserDaten)) {
+    WasserDaten empfangen;
+    memcpy(&empfangen, data, sizeof(WasserDaten));
+
+    // PeerID 2,3,4 -> Index 0,1,2
+    int idx = empfangen.peerID - 2;
+    if (idx >= 0 && idx < 3) {
+      peers[idx].zaehler = empfangen.zaehler;
+      peers[idx].online = true;
+      peers[idx].neuerWert = true;
+
+      Serial.printf("Empfangen von %s: %lu Liter\n", peers[idx].name, empfangen.zaehler);
+      logToSD(idx, empfangen.zaehler);
+    }
+  }
+}
+
+// ===== WiFi-Kanal ermitteln =====
+uint8_t getWiFiChannel() {
+  uint8_t primaryChan = 0;
+  wifi_second_chan_t secondChan;
+  esp_wifi_get_channel(&primaryChan, &secondChan);
+  return primaryChan;
+}
+
+// ===== Peer registrieren =====
+void addPeer(uint8_t *mac) {
+  esp_now_peer_info_t info = {};
+  memcpy(info.peer_addr, mac, 6);
+  info.channel = getWiFiChannel();  // gleicher Kanal wie Router
+  info.encrypt = false;
+  esp_now_add_peer(&info);
+}
+
+// ===== Display: Kopfzeile (einmalig) =====
+void drawHeader() {
+  tft.fillScreen(TFT_BLACK);
+
+  // Titel
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("WasserKontrolle", 160, 5);
+
+  tft.drawFastHLine(0, 32, 320, TFT_DARKGREY);
+
+  // Peer-Namen
+  tft.setTextDatum(TL_DATUM);
+  for (int i = 0; i < 3; i++) {
+    int y = 38 + i * 50;
+
+    // Name
+    tft.setTextFont(2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(peers[i].name, 10, y);
+
+    // Trennlinie
+    if (i < 2) tft.drawFastHLine(10, y + 45, 300, TFT_DARKGREY);
+  }
+}
+
+// ===== Display: Status aktualisieren =====
+void updateStatus() {
+  tft.setTextDatum(TL_DATUM);
+  for (int i = 0; i < 3; i++) {
+    int y = 38 + i * 50;
+    uint16_t color = peers[i].online ? TFT_GREEN : TFT_RED;
+
+    // Status-Kreis
+    tft.fillCircle(295, y + 8, 9, color);
+
+    // Literzahl anzeigen
+    tft.fillRect(10, y + 20, 250, 20, TFT_BLACK);
+    tft.setTextFont(4);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    char litBuf[30];
+    snprintf(litBuf, sizeof(litBuf), "%lu L", peers[i].zaehler);
+    tft.drawString(litBuf, 10, y + 20);
+
+    // Online/Offline Text
+    tft.fillRect(260, y + 22, 60, 16, TFT_BLACK);
+    tft.setTextFont(2);
+    tft.setTextColor(color, TFT_BLACK);
+    tft.drawString(peers[i].online ? "ON" : "OFF", 260, y + 22);
+  }
+}
+
+// ===== Touch-Button zeichnen =====
+void drawButton(const char* text, uint16_t color) {
+  tft.fillRoundRect(200, 195, 115, 40, 8, color);
+  tft.drawRoundRect(200, 195, 115, 40, 8, TFT_WHITE);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_WHITE, color);
+  tft.drawString(text, 257, 215);
+}
+
+// ===== SD-Log auf Display anzeigen (letzte 10 Zeilen) =====
+void showSDLog() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("SD-Karten Log", 160, 5);
+  tft.drawFastHLine(0, 32, 320, TFT_DARKGREY);
+
+  if (!sdOK) {
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextFont(2);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("Keine SD-Karte!", 160, 120);
+    drawButton("Zurueck", TFT_MAROON);
+    return;
+  }
+
+  File f = SD.open("/wasserlog.csv");
+  if (!f) {
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextFont(2);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("Datei nicht gefunden!", 160, 120);
+    drawButton("Zurueck", TFT_MAROON);
+    return;
+  }
+
+  // Alle Zeilen einlesen, letzte 10 merken
+  String zeilen[10];
+  int count = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) {
+      zeilen[count % 10] = line;
+      count++;
+    }
+  }
+  f.close();
+
+  // Letzte 10 Zeilen anzeigen
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  int startIdx = (count > 10) ? count - 10 : 0;
+  int displayed = (count > 10) ? 10 : count;
+
+  for (int i = 0; i < displayed; i++) {
+    int ringIdx = (startIdx + i) % 10;
+    tft.drawString(zeilen[ringIdx], 5, 38 + i * 18);
+  }
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(1);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  char infoBuf[30];
+  snprintf(infoBuf, sizeof(infoBuf), "%d Eintraege gesamt", count > 0 ? count - 1 : 0);
+  tft.drawString(infoBuf, 5, 210);
+
+  drawButton("Zurueck", TFT_MAROON);
+}
+
+// ===== Aktuelle Zeit als String =====
+String getTimeString() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "Zeit nicht verfügbar";
+  }
+  char buf[30];
+  strftime(buf, sizeof(buf), "%d.%m.%Y  %H:%M:%S", &timeinfo);
+  return String(buf);
+}
+
+// ===== Webserver: HTML-Seite =====
+void handleRoot() {
+  String zeitstempel = getTimeString();
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="refresh" content="5">
+  <title>WasserKontrolle</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
+    h1 { text-align: center; color: #00d4ff; }
+    .container { max-width: 600px; margin: 0 auto; }
+    .peer { background: #16213e; border-radius: 10px; padding: 15px 20px; margin: 12px 0;
+            display: flex; justify-content: space-between; align-items: center;
+            border-left: 4px solid #444; }
+    .peer.online { border-left-color: #00ff88; }
+    .peer.offline { border-left-color: #ff4444; }
+    .peer-name { font-size: 1.1em; font-weight: bold; }
+    .peer-mac { font-size: 0.8em; color: #888; margin-top: 4px; }
+    .peer-liter { font-size: 1.2em; color: #00d4ff; margin-top: 6px; }
+    .status { font-size: 0.95em; font-weight: bold; padding: 6px 14px; border-radius: 20px; }
+    .status.online { background: #00ff8833; color: #00ff88; }
+    .status.offline { background: #ff444433; color: #ff4444; }
+    .footer { text-align: center; color: #555; margin-top: 30px; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>&#128167; WasserKontrolle</h1>
+)rawliteral";
+
+  html += "<div style='text-align:center; color:#aaa; font-size:0.9em; margin-bottom:10px;'>Stand: ";
+  html += zeitstempel;
+  html += "</div>";
+
+  html += R"rawliteral(
+)rawliteral";
+
+  for (int i = 0; i < 3; i++) {
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+      peers[i].mac[0], peers[i].mac[1], peers[i].mac[2],
+      peers[i].mac[3], peers[i].mac[4], peers[i].mac[5]);
+
+    const char* cls = peers[i].online ? "online" : "offline";
+    const char* txt = peers[i].online ? "ONLINE" : "OFFLINE";
+
+    html += "<div class='peer ";
+    html += cls;
+    html += "'><div><div class='peer-name'>";
+    html += peers[i].name;
+    html += "</div><div class='peer-mac'>MAC: ";
+    html += macStr;
+    html += "</div><div class='peer-liter'>";
+    html += String(peers[i].zaehler);
+    html += " Liter</div></div><span class='status ";
+    html += cls;
+    html += "'>";
+    html += txt;
+    html += "</span></div>";
+  }
+
+  html += R"rawliteral(
+    <div class="footer">Automatische Aktualisierung alle 5 Sekunden<br>IP: )rawliteral";
+  html += WiFi.localIP().toString();
+  html += R"rawliteral(</div>
+  </div>
+</body>
+</html>
+)rawliteral";
+
+  server.send(200, "text/html", html);
+}
+
+// ===== SETUP =====
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Display
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+  tft.init();
+  tft.setRotation(1);
+  Serial.println("Display OK");
+
+  // Touch initialisieren (VSPI - globales SPI Objekt, exakt wie Wasseruhr-Backup)
+  SPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS_PIN);
+  ts.begin();
+  ts.setRotation(1);
+  Serial.println("Touch OK (VSPI)");
+  lastTouch = millis() + 3000;  // Touch erst nach 3 Sek akzeptieren
+
+  // SD-Karte initialisieren (eigener HSPI-Bus, kein Konflikt mit Touch)
+  sdSPI.begin(18, 19, 23, SD_CS);
+  if (SD.begin(SD_CS, sdSPI)) {
+    sdOK = true;
+    Serial.println("SD-Karte OK");
+    // CSV-Header schreiben falls Datei neu
+    if (!SD.exists("/wasserlog.csv")) {
+      File f = SD.open("/wasserlog.csv", FILE_WRITE);
+      if (f) {
+        f.println("Zeitstempel;Sensor;Liter");
+        f.close();
+      }
+    }
+  } else {
+    sdOK = false;
+    Serial.println("SD-Karte FEHLER oder nicht eingesteckt!");
+  }
+
+  // WiFi im AP+STA Modus (für ESP-NOW + WLAN gleichzeitig)
+  WiFi.mode(WIFI_AP_STA);
+
+  // Mit WLAN verbinden
+  Serial.printf("Verbinde mit WLAN: %s\n", ssid);
+  WiFi.begin(ssid, wlanPass);
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("Verbinde mit WLAN...", 160, 120);
+
+  int timeout = 0;
+  while (WiFi.status() != WL_CONNECTED && timeout < 20) {
+    delay(500);
+    Serial.print(".");
+    timeout++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\nWLAN verbunden! IP: %s\n", WiFi.localIP().toString().c_str());
+    // NTP Zeitsynchronisation (MEZ = UTC+1, MESZ = UTC+2)
+    configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
+    Serial.println("NTP Zeitsync gestartet");
+  } else {
+    Serial.println("\nWLAN-Verbindung fehlgeschlagen!");
+  }
+
+  // ESP-NOW initialisieren
+  Serial.println("\n=== ESP-NOW Master ===");
+  Serial.print("Eigene MAC: ");
+  Serial.println(WiFi.macAddress());
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW Init Fehler!");
+    tft.fillScreen(TFT_RED);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextFont(4);
+    tft.setTextColor(TFT_WHITE, TFT_RED);
+    tft.drawString("ESP-NOW FEHLER!", 160, 120);
+    return;
+  }
+
+  esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onDataRecv);
+
+  addPeer(mac_haupt);
+  addPeer(mac_entkalker);
+  addPeer(mac_offen);
+
+  Serial.printf("ESP-NOW bereit, 3 Peers registriert (Kanal %d)\n", getWiFiChannel());
+
+  // Webserver starten
+  server.on("/", handleRoot);
+  server.begin();
+  Serial.println("Webserver gestartet auf Port 80");
+
+  drawHeader();
+  drawButton("SD Log", TFT_NAVY);
+
+  // IP-Adresse auf Display anzeigen
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(2);
+  if (WiFi.status() == WL_CONNECTED) {
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("IP: " + WiFi.localIP().toString(), 10, 200);
+  } else {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("Kein WLAN!", 10, 200);
+  }
+
+  updateStatus();
+}
+
+// ===== LOOP =====
+void loop() {
+  // Webserver-Anfragen bearbeiten
+  server.handleClient();
+
+  // ===== TOUCH-KALIBRIERUNGSTEST =====
+  // Zeichnet roten Punkt wo du drueckst + zeigt Koordinaten
+  // TODO: Nach Kalibrierung entfernen!
+  int tx, ty;
+  if (getTouch(tx, ty) && millis() - lastTouch > 300) {
+    lastTouch = millis();
+    Serial.printf("Touch mapped: x=%d, y=%d\n", tx, ty);
+    
+    // Roten Punkt an Touch-Position zeichnen
+    tft.fillCircle(tx, ty, 5, TFT_RED);
+    
+    // Koordinaten anzeigen
+    tft.fillRect(80, 110, 160, 20, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextFont(2);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    char buf[30];
+    snprintf(buf, sizeof(buf), "x=%d y=%d", tx, ty);
+    tft.drawString(buf, 160, 120);
+  }
+
+  // Im Log-Modus kein Status-Update
+  if (showLog) {
+    delay(100);
+    return;
+  }
+
+  // Ping an alle Peers senden
+  uint8_t ping = 1;
+  for (int i = 0; i < 3; i++) {
+    esp_now_send(peers[i].mac, &ping, sizeof(ping));
+    delay(50);
+  }
+
+  // Kurz warten auf Callbacks
+  delay(200);
+
+  // Display aktualisieren
+  updateStatus();
+
+  // Uhrzeit auf Display anzeigen
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.fillRect(0, 220, 195, 18, TFT_BLACK);
+  tft.drawString(getTimeString(), 10, 220);
+
+  // Touch-Debug: alle 5 Sek rohe Werte ausgeben
+  static unsigned long lastDebug = 0;
+  if (millis() - lastDebug > 5000) {
+    lastDebug = millis();
+    TS_Point p = ts.getPoint();
+    Serial.printf("[Touch-Debug] RAW x=%d y=%d z=%d\n", p.x, p.y, p.z);
+  }
+
+  // Serial-Ausgabe
+  for (int i = 0; i < 3; i++) {
+    Serial.printf("%s: %s\n", peers[i].name, peers[i].online ? "ONLINE" : "OFFLINE");
+  }
+  Serial.println("---");
+
+  delay(3000);
+}
