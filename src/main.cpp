@@ -21,7 +21,7 @@
 #define TOUCH_MISO 39
 #define TOUCH_CLK  25
 
-// SPI-Trick: XPT2046 auf VSPI umleiten (VERIFIZIERT!)
+// SPI-Trick: XPT2046 auf VSPI umleiten
 SPIClass touchSPI(VSPI);
 #define SPI touchSPI
 #include <XPT2046_Touchscreen.h>
@@ -31,16 +31,22 @@ SPIClass touchSPI(VSPI);
 const char* ssid     = "6360Achalmstr";
 const char* wlanPass = "mostkrug2011";
 
+// ===== Dateien =====
+const char* WATER_LOG_FILE   = "/wasserlog.csv";
+const char* COUNTER_FILE     = "/zaehlerstaende.csv";
+
+// ===== Hardware =====
 TFT_eSPI tft = TFT_eSPI();
 SPIClass sdSPI(HSPI);
 XPT2046_Touchscreen ts(TOUCH_CS, 255);
 WebServer server(80);
 
+// ===== Status =====
 bool sdOK = false;
 bool lastTouched = false;
 unsigned long lastTouch = 0;
 
-// Touch-Kalibrierung (VERIFIZIERT!)
+// Touch-Kalibrierung
 int16_t calX0 = 300, calY0 = 300;
 int16_t calX1 = 3800, calY1 = 3800;
 
@@ -76,30 +82,177 @@ const char* kbRow3 = "YXCVBNM";
 #define KB_Y_START 100
 
 // ===== MAC-Adressen der Peers =====
-uint8_t mac_haupt[]    = {0xE0, 0x8C, 0xFE, 0x58, 0x5D, 0x7C};
+uint8_t mac_haupt[]     = {0xE0, 0x8C, 0xFE, 0x58, 0x5D, 0x7C};
 uint8_t mac_entkalker[] = {0xE0, 0x8C, 0xFE, 0x59, 0x59, 0x94};
-uint8_t mac_offen[]    = {0xE0, 0x8C, 0xFE, 0xB6, 0xEB, 0x34};
+uint8_t mac_offen[]     = {0xE0, 0x8C, 0xFE, 0xB6, 0xEB, 0x34};
 
 // ===== Peer-Status =====
 struct PeerInfo {
   const char* name;
   uint8_t* mac;
   bool online;
-  uint32_t zaehler;
+  uint32_t zaehler;       // GESAMTSTAND
   bool neuerWert;
+  unsigned long lastSeen;
 };
 
 PeerInfo peers[3] = {
-  {"Hauptwasseruhr",  mac_haupt,    false, 0, false},
-  {"Entkalkeruhr",    mac_entkalker, false, 0, false},
-  {"(offen)",         mac_offen,    false, 0, false}
+  {"Hauptwasseruhr",  mac_haupt,      false, 0, false, 0},
+  {"Entkalkeruhr",    mac_entkalker,  false, 0, false, 0},
+  {"(offen)",         mac_offen,      false, 0, false, 0}
 };
 
-// ===== Datenpaket (identisch auf Slave) =====
+// ===== Datenpaket vom Slave =====
+// Slave sendet DIFFERENZ / Impulsblock
 struct WasserDaten {
   uint8_t  peerID;
   uint32_t zaehler;
 };
+
+// ===== Vorwärtsdeklarationen =====
+void drawMainPage();
+void updatePeerStatus();
+void drawKeyboardPage();
+void drawNumberPage();
+void drawFilesPage();
+void drawViewPage();
+void drawSDLogPage();
+void loadFileList();
+
+// ===== Hilfsfunktionen =====
+String getTimeString() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "---";
+  char buf[30];
+  strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M:%S", &timeinfo);
+  return String(buf);
+}
+
+String htmlEscape(const String &s) {
+  String out;
+  out.reserve(s.length() + 20);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '&') out += "&amp;";
+    else if (c == '<') out += "&lt;";
+    else if (c == '>') out += "&gt;";
+    else out += c;
+  }
+  return out;
+}
+
+uint8_t getWiFiChannel() {
+  uint8_t primaryChan = 0;
+  wifi_second_chan_t secondChan;
+  esp_wifi_get_channel(&primaryChan, &secondChan);
+  return primaryChan;
+}
+
+void addPeer(uint8_t *mac) {
+  esp_now_peer_info_t info = {};
+  memcpy(info.peer_addr, mac, 6);
+  info.channel = getWiFiChannel();
+  info.encrypt = false;
+  esp_now_add_peer(&info);
+}
+
+int nextFileNumber() {
+  for (int i = 1; i <= 999; i++) {
+    char fname[20];
+    sprintf(fname, "/notiz%03d.txt", i);
+    if (!SD.exists(fname)) return i;
+  }
+  return 999;
+}
+
+// ===== Zählerstand speichern / laden =====
+void ensureCounterFile() {
+  if (!sdOK) return;
+  if (!SD.exists(COUNTER_FILE)) {
+    File f = SD.open(COUNTER_FILE, FILE_WRITE);
+    if (f) {
+      f.println("Sensor;Gesamtstand");
+      f.println("Hauptwasseruhr;0");
+      f.println("Entkalkeruhr;0");
+      f.println("(offen);0");
+      f.close();
+    }
+  }
+}
+
+void saveCounterState() {
+  if (!sdOK) return;
+
+  SD.remove(COUNTER_FILE);
+  File f = SD.open(COUNTER_FILE, FILE_WRITE);
+  if (!f) return;
+
+  f.println("Sensor;Gesamtstand");
+  for (int i = 0; i < 3; i++) {
+    f.printf("%s;%lu\n", peers[i].name, peers[i].zaehler);
+  }
+  f.close();
+}
+
+void loadCounterState() {
+  if (!sdOK) return;
+
+  ensureCounterFile();
+
+  File f = SD.open(COUNTER_FILE, FILE_READ);
+  if (!f) return;
+
+  // Header überspringen
+  String line = f.readStringUntil('\n');
+  line.trim();
+
+  while (f.available()) {
+    String row = f.readStringUntil('\n');
+    row.trim();
+    if (row.length() == 0) continue;
+
+    int sep = row.indexOf(';');
+    if (sep < 0) continue;
+
+    String sensor = row.substring(0, sep);
+    String value  = row.substring(sep + 1);
+
+    for (int i = 0; i < 3; i++) {
+      if (sensor == peers[i].name) {
+        peers[i].zaehler = (uint32_t)value.toInt();
+      }
+    }
+  }
+
+  f.close();
+}
+
+// ===== Logging =====
+void ensureWaterLogFile() {
+  if (!sdOK) return;
+  if (!SD.exists(WATER_LOG_FILE)) {
+    File f = SD.open(WATER_LOG_FILE, FILE_WRITE);
+    if (f) {
+      f.println("Zeitstempel;Sensor;Impulse;Gesamtstand");
+      f.close();
+    }
+  }
+}
+
+void logToSD(int peerIdx, uint32_t impulseBlock, uint32_t gesamtstand) {
+  if (!sdOK) return;
+
+  String zeit = getTimeString();
+  File f = SD.open(WATER_LOG_FILE, FILE_APPEND);
+  if (f) {
+    f.printf("%s;%s;%lu;%lu\n",
+             zeit.c_str(),
+             peers[peerIdx].name,
+             impulseBlock,
+             gesamtstand);
+    f.close();
+  }
+}
 
 // ===== Touch lesen =====
 bool getTouch(int &tx, int &ty) {
@@ -115,11 +268,12 @@ bool getTouch(int &tx, int &ty) {
     lastTouched = true;
     return true;
   }
+
   if (!touched) lastTouched = false;
   return false;
 }
 
-// ===== Button zeichnen =====
+// ===== UI Hilfen =====
 void drawBtn(int x, int y, int w, int h, const char* label, uint16_t color) {
   tft.fillRoundRect(x, y, w, h, 4, color);
   tft.drawRoundRect(x, y, w, h, 4, TFT_WHITE);
@@ -142,39 +296,37 @@ bool btnHit(int bx, int by, int bw, int bh, int tx, int ty) {
   return (tx >= bx && tx <= bx + bw && ty >= by && ty <= by + bh);
 }
 
-// ===== Text mehrzeilig =====
 void drawWrappedText(String text, int x, int y, int maxW, uint16_t color) {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(color, TFT_BLACK);
+
   int cx = x, cy = y;
   String word = "";
+
   for (unsigned int i = 0; i <= text.length(); i++) {
     char c = (i < text.length()) ? text[i] : ' ';
     if (c == '\n') {
       tft.drawString(word, cx, cy);
-      word = ""; cx = x; cy += 12;
+      word = "";
+      cx = x;
+      cy += 12;
     } else if (c == ' ' || i == text.length()) {
       int ww = tft.textWidth(word + " ");
-      if (cx + ww > x + maxW) { cx = x; cy += 12; }
+      if (cx + ww > x + maxW) {
+        cx = x;
+        cy += 12;
+      }
       tft.drawString(word + " ", cx, cy);
-      cx += ww; word = "";
+      cx += ww;
+      word = "";
     } else {
       word += c;
     }
   }
 }
 
-int nextFileNumber() {
-  for (int i = 1; i <= 999; i++) {
-    char fname[20];
-    sprintf(fname, "/notiz%03d.txt", i);
-    if (!SD.exists(fname)) return i;
-  }
-  return 999;
-}
-
-// ===== ESP-NOW Callbacks =====
+// ===== ESP-NOW =====
 void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
   for (int i = 0; i < 3; i++) {
     if (memcmp(mac, peers[i].mac, 6) == 0) {
@@ -183,70 +335,144 @@ void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
   }
 }
 
-void logToSD(int peerIdx, uint32_t zaehler) {
-  if (!sdOK) return;
-  struct tm timeinfo;
-  char zeitBuf[30] = "kein NTP";
-  if (getLocalTime(&timeinfo)) {
-    strftime(zeitBuf, sizeof(zeitBuf), "%d.%m.%Y %H:%M:%S", &timeinfo);
-  }
-  File f = SD.open("/wasserlog.csv", FILE_APPEND);
-  if (f) {
-    f.printf("%s;%s;%lu\n", zeitBuf, peers[peerIdx].name, zaehler);
-    f.close();
-  }
+void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
+  if (len != sizeof(WasserDaten)) return;
+
+  WasserDaten empfangen;
+  memcpy(&empfangen, data, sizeof(WasserDaten));
+
+  int idx = empfangen.peerID - 2;
+  if (idx < 0 || idx >= 3) return;
+
+  // WICHTIG:
+  // Slave sendet Impulsblöcke / Differenzen.
+  // Darum hier AUFADDEN auf den Gesamtzähler.
+  uint32_t impulseBlock = empfangen.zaehler;
+  peers[idx].zaehler += impulseBlock;
+  peers[idx].online = true;
+  peers[idx].neuerWert = true;
+  peers[idx].lastSeen = millis();
+
+  Serial.printf("Empfangen von %s: +%lu Impulse, Gesamt=%lu Liter\n",
+                peers[idx].name,
+                impulseBlock,
+                peers[idx].zaehler);
+
+  logToSD(idx, impulseBlock, peers[idx].zaehler);
+  saveCounterState();
 }
 
-void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
-  if (len == sizeof(WasserDaten)) {
-    WasserDaten empfangen;
-    memcpy(&empfangen, data, sizeof(WasserDaten));
-    int idx = empfangen.peerID - 2;
-    if (idx >= 0 && idx < 3) {
-      peers[idx].zaehler = empfangen.zaehler;
-      peers[idx].online = true;
-      peers[idx].neuerWert = true;
-      Serial.printf("Empfangen von %s: %lu Liter\n", peers[idx].name, empfangen.zaehler);
-      logToSD(idx, empfangen.zaehler);
+// ===== Browser =====
+String buildLogHtmlTable() {
+  if (!sdOK) return "<p>Keine SD-Karte verfügbar.</p>";
+
+  File f = SD.open(WATER_LOG_FILE, FILE_READ);
+  if (!f) return "<p>Kein Wasserlog vorhanden.</p>";
+
+  // Letzte 30 Zeilen puffern
+  const int MAX_LINES = 30;
+  String lines[MAX_LINES];
+  int count = 0;
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) {
+      lines[count % MAX_LINES] = line;
+      count++;
     }
   }
+  f.close();
+
+  String html = "<table style='width:100%;border-collapse:collapse;margin-top:20px'>";
+  html += "<tr>"
+          "<th style='text-align:left;border-bottom:1px solid #555;padding:6px'>Zeit</th>"
+          "<th style='text-align:left;border-bottom:1px solid #555;padding:6px'>Sensor</th>"
+          "<th style='text-align:right;border-bottom:1px solid #555;padding:6px'>Impulse</th>"
+          "<th style='text-align:right;border-bottom:1px solid #555;padding:6px'>Gesamt</th>"
+          "</tr>";
+
+  int start = (count > MAX_LINES) ? count - MAX_LINES : 0;
+  int shown = (count > MAX_LINES) ? MAX_LINES : count;
+
+  for (int i = 0; i < shown; i++) {
+    String row = lines[(start + i) % MAX_LINES];
+
+    int p1 = row.indexOf(';');
+    int p2 = row.indexOf(';', p1 + 1);
+    int p3 = row.indexOf(';', p2 + 1);
+
+    if (p1 < 0 || p2 < 0 || p3 < 0) continue;
+
+    String zeit   = row.substring(0, p1);
+    String sensor = row.substring(p1 + 1, p2);
+    String imp    = row.substring(p2 + 1, p3);
+    String gesamt = row.substring(p3 + 1);
+
+    html += "<tr>";
+    html += "<td style='padding:6px;border-bottom:1px solid #333'>" + htmlEscape(zeit) + "</td>";
+    html += "<td style='padding:6px;border-bottom:1px solid #333'>" + htmlEscape(sensor) + "</td>";
+    html += "<td style='padding:6px;border-bottom:1px solid #333;text-align:right'>" + htmlEscape(imp) + "</td>";
+    html += "<td style='padding:6px;border-bottom:1px solid #333;text-align:right'>" + htmlEscape(gesamt) + "</td>";
+    html += "</tr>";
+  }
+
+  html += "</table>";
+  return html;
 }
 
-uint8_t getWiFiChannel() {
-  uint8_t primaryChan = 0;
-  wifi_second_chan_t secondChan;
-  esp_wifi_get_channel(&primaryChan, &secondChan);
-  return primaryChan;
+void handleRoot() {
+  String zeitstempel = getTimeString();
+
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+    "<meta http-equiv='refresh' content='5'><title>WasserKontrolle</title>"
+    "<style>"
+    "body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px}"
+    "h1{text-align:center;color:#00d4ff}"
+    ".p{background:#16213e;border-radius:10px;padding:15px;margin:12px 0;display:flex;justify-content:space-between;align-items:center}"
+    ".on{border-left:4px solid #0f8}.off{border-left:4px solid #f44}"
+    ".n{font-weight:bold}.l{color:#00d4ff;font-size:1.2em;margin-top:6px}"
+    ".s{padding:6px 14px;border-radius:20px;font-weight:bold}"
+    ".son{background:#00ff8833;color:#0f8}.soff{background:#ff444433;color:#f44}"
+    "a{color:#8fd3ff}"
+    "</style></head><body>";
+
+  html += "<h1>&#128167; WasserKontrolle</h1>";
+  html += "<div style='text-align:center;color:#aaa;font-size:0.9em'>Stand: " + zeitstempel + "</div>";
+
+  for (int i = 0; i < 3; i++) {
+    const char* cls  = peers[i].online ? "on" : "off";
+    const char* txt  = peers[i].online ? "ONLINE" : "OFFLINE";
+    const char* scls = peers[i].online ? "son" : "soff";
+
+    html += "<div class='p " + String(cls) + "'>";
+    html += "<div><div class='n'>" + String(peers[i].name) + "</div>";
+    html += "<div class='l'>" + String(peers[i].zaehler) + " Liter</div></div>";
+    html += "<span class='s " + String(scls) + "'>" + txt + "</span>";
+    html += "</div>";
+  }
+
+  html += "<h2 style='margin-top:30px;color:#ffd166'>Letzte Wasserlog-Einträge</h2>";
+  html += buildLogHtmlTable();
+
+  html += "<div style='text-align:center;color:#555;margin-top:30px;font-size:0.85em'>"
+          "Auto-Refresh 5s | IP: " + WiFi.localIP().toString() + "</div>";
+
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
 }
 
-void addPeer(uint8_t *mac) {
-  esp_now_peer_info_t info = {};
-  memcpy(info.peer_addr, mac, 6);
-  info.channel = getWiFiChannel();
-  info.encrypt = false;
-  esp_now_add_peer(&info);
-}
-
-String getTimeString() {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) return "---";
-  char buf[30];
-  strftime(buf, sizeof(buf), "%d.%m.%Y  %H:%M:%S", &timeinfo);
-  return String(buf);
-}
-
-// ===== HAUPTSEITE: Buttons oben + Peer-Status unten =====
+// ===== Hauptseite =====
 void drawMainPage() {
   tft.fillScreen(TFT_BLACK);
 
-  // Titel
   tft.setTextDatum(TC_DATUM);
   tft.setTextSize(1);
   tft.setTextFont(2);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("WasserKontrolle", 160, 2);
 
-  // 5 kleine Buttons oben (Zeile bei y=20, Hoehe 28)
   drawBtnBig(5,   20, 60, 28, "NOTIZ",   0x0400);
   drawBtnBig(70,  20, 60, 28, "DATEIEN", 0x000A);
   drawBtnBig(135, 20, 60, 28, "LETZTE",  0x4808);
@@ -255,28 +481,23 @@ void drawMainPage() {
 
   tft.drawFastHLine(0, 52, 320, TFT_DARKGREY);
 
-  // Peer-Status (3 Zeilen, je 55px)
   for (int i = 0; i < 3; i++) {
     int y = 56 + i * 55;
 
-    // Name
     tft.setTextDatum(TL_DATUM);
     tft.setTextFont(2);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawString(peers[i].name, 10, y);
 
-    // Status-Kreis
     uint16_t col = peers[i].online ? TFT_GREEN : TFT_RED;
     tft.fillCircle(300, y + 7, 7, col);
 
-    // Literzahl
     tft.setTextFont(4);
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
     char litBuf[20];
     snprintf(litBuf, sizeof(litBuf), "%lu L", peers[i].zaehler);
     tft.drawString(litBuf, 10, y + 22);
 
-    // Online/Offline
     tft.setTextFont(2);
     tft.setTextColor(col, TFT_BLACK);
     tft.drawString(peers[i].online ? "ON" : "OFF", 270, y + 26);
@@ -284,7 +505,6 @@ void drawMainPage() {
     if (i < 2) tft.drawFastHLine(10, y + 50, 300, TFT_DARKGREY);
   }
 
-  // IP + Zeit unten
   tft.setTextDatum(TL_DATUM);
   tft.setTextFont(1);
   if (WiFi.status() == WL_CONNECTED) {
@@ -295,16 +515,13 @@ void drawMainPage() {
   tft.drawString(getTimeString(), 160, 225);
 }
 
-// ===== Peer-Status aktualisieren (ohne alles neu zu zeichnen) =====
 void updatePeerStatus() {
   for (int i = 0; i < 3; i++) {
     int y = 56 + i * 55;
     uint16_t col = peers[i].online ? TFT_GREEN : TFT_RED;
 
-    // Status-Kreis
     tft.fillCircle(300, y + 7, 7, col);
 
-    // Literzahl
     tft.fillRect(10, y + 22, 250, 24, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     tft.setTextFont(4);
@@ -313,14 +530,12 @@ void updatePeerStatus() {
     snprintf(litBuf, sizeof(litBuf), "%lu L", peers[i].zaehler);
     tft.drawString(litBuf, 10, y + 22);
 
-    // ON/OFF
     tft.fillRect(265, y + 26, 35, 16, TFT_BLACK);
     tft.setTextFont(2);
     tft.setTextColor(col, TFT_BLACK);
     tft.drawString(peers[i].online ? "ON" : "OFF", 270, y + 26);
   }
 
-  // Zeit aktualisieren
   tft.fillRect(160, 225, 160, 10, TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
   tft.setTextFont(1);
@@ -329,18 +544,17 @@ void updatePeerStatus() {
 }
 
 void handleMainPage(int tx, int ty) {
-  // NOTIZ
   if (btnHit(5, 20, 60, 28, tx, ty)) {
     inputText = "";
     currentPage = PAGE_KEYBOARD;
     return;
   }
-  // DATEIEN
+
   if (btnHit(70, 20, 60, 28, tx, ty)) {
     currentPage = PAGE_FILES;
     return;
   }
-  // LETZTE
+
   if (btnHit(135, 20, 60, 28, tx, ty)) {
     int num = nextFileNumber() - 1;
     if (num >= 1) {
@@ -359,12 +573,12 @@ void handleMainPage(int tx, int ty) {
     }
     return;
   }
-  // SD LOG
+
   if (btnHit(200, 20, 60, 28, tx, ty)) {
     currentPage = PAGE_SDLOG;
     return;
   }
-  // DEL (alle Notizen loeschen)
+
   if (btnHit(265, 20, 50, 28, tx, ty)) {
     File root = SD.open("/");
     if (root) {
@@ -383,7 +597,7 @@ void handleMainPage(int tx, int ty) {
   }
 }
 
-// ===== SD-LOG Anzeige (Wasserlog) =====
+// ===== SD-LOG Seite =====
 void drawSDLogPage() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TC_DATUM);
@@ -400,7 +614,7 @@ void drawSDLogPage() {
     return;
   }
 
-  File f = SD.open("/wasserlog.csv");
+  File f = SD.open(WATER_LOG_FILE);
   if (!f) {
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(TFT_RED, TFT_BLACK);
@@ -423,6 +637,7 @@ void drawSDLogPage() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextFont(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
+
   int startIdx = (count > 10) ? count - 10 : 0;
   int displayed = (count > 10) ? 10 : count;
   for (int i = 0; i < displayed; i++) {
@@ -441,7 +656,7 @@ void handleSDLogPage(int tx, int ty) {
   }
 }
 
-// ===== KEYBOARD =====
+// ===== Keyboard =====
 void drawKeyboardPage() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
@@ -452,6 +667,7 @@ void drawKeyboardPage() {
   tft.fillRect(5, 20, 310, 30, TFT_DARKGREY);
   tft.drawRect(5, 20, 310, 30, TFT_WHITE);
   tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+
   String showText = inputText;
   if (showText.length() > 45) showText = ".." + showText.substring(showText.length() - 43);
   tft.drawString(showText + "_", 10, 30);
@@ -470,6 +686,7 @@ void drawKeyboardPage() {
     if (!shiftOn) key[0] += 32;
     drawBtn(x1 + i * KB_STEP, y1, KB_KEY_W, KB_KEY_H, key, 0x2104);
   }
+
   int y2 = y1 + KB_KEY_H + KB_GAP;
   int x2 = (320 - 9 * KB_STEP) / 2;
   for (int i = 0; i < 9; i++) {
@@ -477,6 +694,7 @@ void drawKeyboardPage() {
     if (!shiftOn) key[0] += 32;
     drawBtn(x2 + i * KB_STEP, y2, KB_KEY_W, KB_KEY_H, key, 0x2104);
   }
+
   int y3 = y2 + KB_KEY_H + KB_GAP;
   int x3 = (320 - 7 * KB_STEP) / 2;
   for (int i = 0; i < 7; i++) {
@@ -484,6 +702,7 @@ void drawKeyboardPage() {
     if (!shiftOn) key[0] += 32;
     drawBtn(x3 + i * KB_STEP, y3, KB_KEY_W, KB_KEY_H, key, 0x2104);
   }
+
   drawBtn(x3 + 7 * KB_STEP, y3, KB_KEY_W, KB_KEY_H, ".", 0x2104);
   drawBtn(x3 + 8 * KB_STEP, y3, KB_KEY_W, KB_KEY_H, ",", 0x2104);
   drawBtn(x3 + 9 * KB_STEP, y3, KB_KEY_W, KB_KEY_H, "!", 0x2104);
@@ -499,6 +718,7 @@ void drawNumberPage() {
   tft.fillRect(5, 20, 310, 30, TFT_DARKGREY);
   tft.drawRect(5, 20, 310, 30, TFT_WHITE);
   tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+
   String showText = inputText;
   if (showText.length() > 45) showText = ".." + showText.substring(showText.length() - 43);
   tft.drawString(showText + "_", 10, 30);
@@ -517,12 +737,14 @@ void drawNumberPage() {
     char key[2] = {nums[i], 0};
     drawBtn(x1 + i * KB_STEP, y1, KB_KEY_W, KB_KEY_H, key, 0x0010);
   }
+
   const char* syms1 = "+-*/=@#&()";
   int y2 = y1 + KB_KEY_H + KB_GAP;
   for (int i = 0; i < 10; i++) {
     char key[2] = {syms1[i], 0};
     drawBtn(x1 + i * KB_STEP, y2, KB_KEY_W, KB_KEY_H, key, 0x0010);
   }
+
   const char* syms2 = ".,;:!?\"'-_";
   int y3 = y2 + KB_KEY_H + KB_GAP;
   for (int i = 0; i < 10; i++) {
@@ -539,27 +761,47 @@ void handleKeyboardPage(int tx, int ty) {
       sprintf(fname, "/notiz%03d.txt", num);
       delay(100);
       File f = SD.open(fname, FILE_WRITE);
-      if (f) { f.print(inputText); f.close(); }
+      if (f) {
+        f.print(inputText);
+        f.close();
+      }
     }
-    currentPage = PAGE_MAIN; return;
-  }
-  if (btnHit(60, 58, 60, 30, tx, ty)) { currentPage = PAGE_MAIN; return; }
-  if (btnHit(125, 58, 40, 30, tx, ty)) {
-    if (inputText.length() > 0) inputText.remove(inputText.length() - 1);
-    if (numMode) drawNumberPage(); else drawKeyboardPage(); return;
-  }
-  if (btnHit(170, 58, 50, 30, tx, ty)) {
-    if (inputText.length() < INPUT_MAX_LEN) inputText += " ";
-    if (numMode) drawNumberPage(); else drawKeyboardPage(); return;
-  }
-  if (btnHit(225, 58, 40, 30, tx, ty)) {
-    if (numMode) { numMode = false; drawKeyboardPage(); }
-    else { shiftOn = !shiftOn; drawKeyboardPage(); }
+    currentPage = PAGE_MAIN;
     return;
   }
+
+  if (btnHit(60, 58, 60, 30, tx, ty)) {
+    currentPage = PAGE_MAIN;
+    return;
+  }
+
+  if (btnHit(125, 58, 40, 30, tx, ty)) {
+    if (inputText.length() > 0) inputText.remove(inputText.length() - 1);
+    if (numMode) drawNumberPage(); else drawKeyboardPage();
+    return;
+  }
+
+  if (btnHit(170, 58, 50, 30, tx, ty)) {
+    if (inputText.length() < INPUT_MAX_LEN) inputText += " ";
+    if (numMode) drawNumberPage(); else drawKeyboardPage();
+    return;
+  }
+
+  if (btnHit(225, 58, 40, 30, tx, ty)) {
+    if (numMode) {
+      numMode = false;
+      drawKeyboardPage();
+    } else {
+      shiftOn = !shiftOn;
+      drawKeyboardPage();
+    }
+    return;
+  }
+
   if (btnHit(270, 58, 45, 30, tx, ty)) {
     numMode = !numMode;
-    if (numMode) drawNumberPage(); else drawKeyboardPage(); return;
+    if (numMode) drawNumberPage(); else drawKeyboardPage();
+    return;
   }
 
   if (numMode) {
@@ -567,58 +809,86 @@ void handleKeyboardPage(int tx, int ty) {
     const char* syms1 = "+-*/=@#&()";
     const char* syms2 = ".,;:!?\"'-_";
     int x1 = (320 - 10 * KB_STEP) / 2;
-    int y1 = KB_Y_START, y2 = y1+KB_KEY_H+KB_GAP, y3 = y2+KB_KEY_H+KB_GAP;
+    int y1 = KB_Y_START, y2 = y1 + KB_KEY_H + KB_GAP, y3 = y2 + KB_KEY_H + KB_GAP;
+
     for (int i = 0; i < 10; i++) {
-      if (btnHit(x1+i*KB_STEP, y1, KB_KEY_W, KB_KEY_H, tx, ty)) {
-        if (inputText.length() < INPUT_MAX_LEN) inputText += nums[i]; drawNumberPage(); return; }
-      if (btnHit(x1+i*KB_STEP, y2, KB_KEY_W, KB_KEY_H, tx, ty)) {
-        if (inputText.length() < INPUT_MAX_LEN) inputText += syms1[i]; drawNumberPage(); return; }
-      if (btnHit(x1+i*KB_STEP, y3, KB_KEY_W, KB_KEY_H, tx, ty)) {
-        if (inputText.length() < INPUT_MAX_LEN) inputText += syms2[i]; drawNumberPage(); return; }
+      if (btnHit(x1 + i * KB_STEP, y1, KB_KEY_W, KB_KEY_H, tx, ty)) {
+        if (inputText.length() < INPUT_MAX_LEN) inputText += nums[i];
+        drawNumberPage();
+        return;
+      }
+      if (btnHit(x1 + i * KB_STEP, y2, KB_KEY_W, KB_KEY_H, tx, ty)) {
+        if (inputText.length() < INPUT_MAX_LEN) inputText += syms1[i];
+        drawNumberPage();
+        return;
+      }
+      if (btnHit(x1 + i * KB_STEP, y3, KB_KEY_W, KB_KEY_H, tx, ty)) {
+        if (inputText.length() < INPUT_MAX_LEN) inputText += syms2[i];
+        drawNumberPage();
+        return;
+      }
     }
   } else {
     int y1 = KB_Y_START;
     int x1 = (320 - 10 * KB_STEP) / 2;
     for (int i = 0; i < 10; i++) {
-      if (btnHit(x1+i*KB_STEP, y1, KB_KEY_W, KB_KEY_H, tx, ty)) {
-        char c = kbRow1[i]; if (!shiftOn) c += 32;
-        if (inputText.length() < INPUT_MAX_LEN) inputText += c; drawKeyboardPage(); return;
+      if (btnHit(x1 + i * KB_STEP, y1, KB_KEY_W, KB_KEY_H, tx, ty)) {
+        char c = kbRow1[i];
+        if (!shiftOn) c += 32;
+        if (inputText.length() < INPUT_MAX_LEN) inputText += c;
+        drawKeyboardPage();
+        return;
       }
     }
-    int y2 = y1+KB_KEY_H+KB_GAP;
+
+    int y2 = y1 + KB_KEY_H + KB_GAP;
     int x2 = (320 - 9 * KB_STEP) / 2;
     for (int i = 0; i < 9; i++) {
-      if (btnHit(x2+i*KB_STEP, y2, KB_KEY_W, KB_KEY_H, tx, ty)) {
-        char c = kbRow2[i]; if (!shiftOn) c += 32;
-        if (inputText.length() < INPUT_MAX_LEN) inputText += c; drawKeyboardPage(); return;
+      if (btnHit(x2 + i * KB_STEP, y2, KB_KEY_W, KB_KEY_H, tx, ty)) {
+        char c = kbRow2[i];
+        if (!shiftOn) c += 32;
+        if (inputText.length() < INPUT_MAX_LEN) inputText += c;
+        drawKeyboardPage();
+        return;
       }
     }
-    int y3 = y2+KB_KEY_H+KB_GAP;
+
+    int y3 = y2 + KB_KEY_H + KB_GAP;
     int x3 = (320 - 7 * KB_STEP) / 2;
     for (int i = 0; i < 7; i++) {
-      if (btnHit(x3+i*KB_STEP, y3, KB_KEY_W, KB_KEY_H, tx, ty)) {
-        char c = kbRow3[i]; if (!shiftOn) c += 32;
-        if (inputText.length() < INPUT_MAX_LEN) inputText += c; drawKeyboardPage(); return;
+      if (btnHit(x3 + i * KB_STEP, y3, KB_KEY_W, KB_KEY_H, tx, ty)) {
+        char c = kbRow3[i];
+        if (!shiftOn) c += 32;
+        if (inputText.length() < INPUT_MAX_LEN) inputText += c;
+        drawKeyboardPage();
+        return;
       }
     }
+
     const char extras[] = {'.', ',', '!'};
     for (int i = 0; i < 3; i++) {
-      if (btnHit(x3+(7+i)*KB_STEP, y3, KB_KEY_W, KB_KEY_H, tx, ty)) {
-        if (inputText.length() < INPUT_MAX_LEN) inputText += extras[i]; drawKeyboardPage(); return;
+      if (btnHit(x3 + (7 + i) * KB_STEP, y3, KB_KEY_W, KB_KEY_H, tx, ty)) {
+        if (inputText.length() < INPUT_MAX_LEN) inputText += extras[i];
+        drawKeyboardPage();
+        return;
       }
     }
   }
 }
 
-// ===== DATEILISTE =====
+// ===== Dateiliste =====
 void loadFileList() {
   fileCount = 0;
   File root = SD.open("/");
   if (!root) return;
+
   File entry;
   while ((entry = root.openNextFile()) && fileCount < MAX_FILES) {
     String name = String(entry.name());
-    if (name.endsWith(".txt")) { fileNames[fileCount] = "/" + name; fileCount++; }
+    if (name.endsWith(".txt")) {
+      fileNames[fileCount] = "/" + name;
+      fileCount++;
+    }
     entry.close();
   }
   root.close();
@@ -631,24 +901,41 @@ void drawFilesPage() {
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.drawString("SD-Dateien", 160, 5);
   drawBtn(250, 5, 65, 22, "ZURUECK", TFT_RED);
+
   if (fileCount == 0) {
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawString("Keine Dateien", 160, 120);
     return;
   }
+
   int perPage = 6, startY = 35;
   for (int i = 0; i < perPage && (i + fileScrollOffset) < fileCount; i++) {
     drawBtn(10, startY + i * 32, 300, 28, fileNames[i + fileScrollOffset].c_str(), 0x000A);
   }
+
   if (fileScrollOffset > 0) drawBtn(10, 225, 60, 15, "HOCH", 0x4208);
   if (fileScrollOffset + perPage < fileCount) drawBtn(250, 225, 60, 15, "RUNTER", 0x4208);
 }
 
 void handleFilesPage(int tx, int ty) {
-  if (btnHit(250, 5, 65, 22, tx, ty)) { currentPage = PAGE_MAIN; return; }
-  if (btnHit(10, 225, 60, 15, tx, ty) && fileScrollOffset > 0) { fileScrollOffset--; drawFilesPage(); return; }
-  if (btnHit(250, 225, 60, 15, tx, ty)) { fileScrollOffset++; drawFilesPage(); return; }
+  if (btnHit(250, 5, 65, 22, tx, ty)) {
+    currentPage = PAGE_MAIN;
+    return;
+  }
+
+  if (btnHit(10, 225, 60, 15, tx, ty) && fileScrollOffset > 0) {
+    fileScrollOffset--;
+    drawFilesPage();
+    return;
+  }
+
+  if (btnHit(250, 225, 60, 15, tx, ty)) {
+    fileScrollOffset++;
+    drawFilesPage();
+    return;
+  }
+
   int perPage = 6, startY = 35;
   for (int i = 0; i < perPage && (i + fileScrollOffset) < fileCount; i++) {
     if (btnHit(10, startY + i * 32, 300, 28, tx, ty)) {
@@ -656,15 +943,18 @@ void handleFilesPage(int tx, int ty) {
       delay(100);
       File f = SD.open(fileNames[idx].c_str(), FILE_READ);
       if (f) {
-        viewTitle = fileNames[idx]; viewText = "";
+        viewTitle = fileNames[idx];
+        viewText = "";
         while (f.available()) viewText += (char)f.read();
-        f.close(); currentPage = PAGE_VIEW; return;
+        f.close();
+        currentPage = PAGE_VIEW;
+        return;
       }
     }
   }
 }
 
-// ===== DATEI ANZEIGEN =====
+// ===== Datei anzeigen =====
 void drawViewPage() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
@@ -678,40 +968,16 @@ void drawViewPage() {
 }
 
 void handleViewPage(int tx, int ty) {
-  if (btnHit(200, 2, 55, 18, tx, ty)) { currentPage = PAGE_FILES; return; }
+  if (btnHit(200, 2, 55, 18, tx, ty)) {
+    currentPage = PAGE_FILES;
+    return;
+  }
+
   if (btnHit(260, 2, 55, 18, tx, ty)) {
     SD.remove(viewTitle.c_str());
-    currentPage = PAGE_MAIN; return;
+    currentPage = PAGE_MAIN;
+    return;
   }
-}
-
-// ===== Webserver =====
-void handleRoot() {
-  String zeitstempel = getTimeString();
-  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
-    "<meta http-equiv='refresh' content='5'><title>WasserKontrolle</title>"
-    "<style>body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px}"
-    "h1{text-align:center;color:#00d4ff}.p{background:#16213e;border-radius:10px;"
-    "padding:15px;margin:12px 0;display:flex;justify-content:space-between;"
-    "align-items:center}.on{border-left:4px solid #0f8}.off{border-left:4px solid #f44}"
-    ".n{font-weight:bold}.l{color:#00d4ff;font-size:1.2em;margin-top:6px}"
-    ".s{padding:6px 14px;border-radius:20px;font-weight:bold}"
-    ".son{background:#00ff8833;color:#0f8}.soff{background:#ff444433;color:#f44}"
-    "</style></head><body><h1>&#128167; WasserKontrolle</h1>"
-    "<div style='text-align:center;color:#aaa;font-size:0.9em'>Stand: " + zeitstempel + "</div>";
-
-  for (int i = 0; i < 3; i++) {
-    const char* cls = peers[i].online ? "on" : "off";
-    const char* txt = peers[i].online ? "ONLINE" : "OFFLINE";
-    const char* scls = peers[i].online ? "son" : "soff";
-    html += "<div class='p " + String(cls) + "'><div><div class='n'>" + peers[i].name
-         + "</div><div class='l'>" + String(peers[i].zaehler) + " Liter</div></div>"
-         + "<span class='s " + scls + "'>" + txt + "</span></div>";
-  }
-
-  html += "<div style='text-align:center;color:#555;margin-top:30px;font-size:0.85em'>"
-          "Auto-Refresh 5s | IP: " + WiFi.localIP().toString() + "</div></body></html>";
-  server.send(200, "text/html", html);
 }
 
 // ===== SETUP =====
@@ -729,28 +995,28 @@ void setup() {
   tft.fillScreen(TFT_BLACK);
   Serial.println("Display OK");
 
-  // Touch (VSPI - verifiziert!)
+  // Touch
   SPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
   ts.begin();
   ts.setRotation(1);
   Serial.println("Touch OK");
   lastTouch = millis() + 3000;
 
-  // SD (HSPI - verifiziert!)
+  // SD
   sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
   if (SD.begin(SD_CS, sdSPI)) {
     sdOK = true;
     Serial.println("SD-Karte OK");
-    if (!SD.exists("/wasserlog.csv")) {
-      File f = SD.open("/wasserlog.csv", FILE_WRITE);
-      if (f) { f.println("Zeitstempel;Sensor;Liter"); f.close(); }
-    }
+    ensureWaterLogFile();
+    ensureCounterFile();
+    loadCounterState();
+    Serial.println("Zählerstände geladen");
   } else {
     sdOK = false;
     Serial.println("SD-Karte FEHLER!");
   }
 
-  // WiFi AP+STA
+  // WLAN AP+STA
   WiFi.mode(WIFI_AP_STA);
   Serial.printf("Verbinde mit WLAN: %s\n", ssid);
   WiFi.begin(ssid, wlanPass);
@@ -762,7 +1028,8 @@ void setup() {
 
   int timeout = 0;
   while (WiFi.status() != WL_CONNECTED && timeout < 20) {
-    delay(500); timeout++;
+    delay(500);
+    timeout++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -797,6 +1064,13 @@ void setup() {
 void loop() {
   server.handleClient();
 
+  // Offline-Erkennung
+  for (int i = 0; i < 3; i++) {
+    if (peers[i].online && millis() - peers[i].lastSeen > 10000) {
+      peers[i].online = false;
+    }
+  }
+
   int tx, ty;
   if (getTouch(tx, ty) && millis() - lastTouch > 300) {
     lastTouch = millis();
@@ -822,17 +1096,17 @@ void loop() {
     }
   }
 
-  // Auf Hauptseite: Peer-Status + Ping alle 2 Sekunden
+  // Hauptseite aktualisieren + Ping
   static unsigned long lastUpdate = 0;
   if (currentPage == PAGE_MAIN && millis() - lastUpdate > 2000) {
     lastUpdate = millis();
 
-    // Ping an alle Peers
     uint8_t ping = 1;
     for (int i = 0; i < 3; i++) {
       esp_now_send(peers[i].mac, &ping, sizeof(ping));
       delay(20);
     }
+
     delay(100);
     updatePeerStatus();
   }
