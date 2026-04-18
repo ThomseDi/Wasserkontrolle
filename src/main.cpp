@@ -32,8 +32,13 @@ const char* ssid     = "6360Achalmstr";
 const char* wlanPass = "mostkrug2011";
 
 // ===== Dateien =====
-const char* WATER_LOG_FILE   = "/wasserlog.csv";
-const char* COUNTER_FILE     = "/zaehlerstaende.csv";
+const char* WATER_LOG_FILE = "/wasserlog.csv";
+const char* COUNTER_FILE   = "/zaehlerstaende.csv";
+
+// ===== Zeitprüfung =====
+// 18.04.2026 00:00:00 MESZ ≈ 17.04.2026 22:00:00 UTC
+// Etwas lockerer Mindestwert, damit offensichtliche Altzeiten abgewiesen werden
+const time_t MIN_VALID_TIME = 1776000000;
 
 // ===== Hardware =====
 TFT_eSPI tft = TFT_eSPI();
@@ -45,6 +50,8 @@ WebServer server(80);
 bool sdOK = false;
 bool lastTouched = false;
 unsigned long lastTouch = 0;
+bool timeValid = false;
+unsigned long lastClockCheck = 0;
 
 // Touch-Kalibrierung
 int16_t calX0 = 300, calY0 = 300;
@@ -91,19 +98,19 @@ struct PeerInfo {
   const char* name;
   uint8_t* mac;
   bool online;
-  uint32_t zaehler;       // GESAMTSTAND
+  uint32_t zaehler;   // Gesamtstand
   bool neuerWert;
   unsigned long lastSeen;
 };
 
 PeerInfo peers[3] = {
-  {"Hauptwasseruhr",  mac_haupt,      false, 0, false, 0},
-  {"Entkalkeruhr",    mac_entkalker,  false, 0, false, 0},
-  {"(offen)",         mac_offen,      false, 0, false, 0}
+  {"Hauptwasseruhr", mac_haupt, false, 0, false, 0},
+  {"Entkalkeruhr",   mac_entkalker, false, 0, false, 0},
+  {"(offen)",        mac_offen, false, 0, false, 0}
 };
 
-// ===== Datenpaket vom Slave =====
-// Slave sendet DIFFERENZ / Impulsblock
+// ===== Datenpaket (identisch auf Slave) =====
+// Slave sendet Impulsblock / Differenz
 struct WasserDaten {
   uint8_t  peerID;
   uint32_t zaehler;
@@ -118,16 +125,11 @@ void drawFilesPage();
 void drawViewPage();
 void drawSDLogPage();
 void loadFileList();
+void handleLogPage();
+void handleDownloadCSV();
+void handleClearLog();
 
 // ===== Hilfsfunktionen =====
-String getTimeString() {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) return "---";
-  char buf[30];
-  strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M:%S", &timeinfo);
-  return String(buf);
-}
-
 String htmlEscape(const String &s) {
   String out;
   out.reserve(s.length() + 20);
@@ -165,9 +167,39 @@ int nextFileNumber() {
   return 999;
 }
 
+void checkTimeValid() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    timeValid = false;
+    return;
+  }
+
+  time_t now;
+  time(&now);
+  timeValid = (now >= MIN_VALID_TIME);
+}
+
+String getTimeString() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "---";
+
+  time_t now;
+  time(&now);
+  if (now < MIN_VALID_TIME) return "---";
+
+  char buf[30];
+  strftime(buf, sizeof(buf), "%d.%m.%Y %H:%M:%S", &timeinfo);
+  return String(buf);
+}
+
+bool peerIsOnline(int i) {
+  return (millis() - peers[i].lastSeen <= 10000);
+}
+
 // ===== Zählerstand speichern / laden =====
 void ensureCounterFile() {
   if (!sdOK) return;
+
   if (!SD.exists(COUNTER_FILE)) {
     File f = SD.open(COUNTER_FILE, FILE_WRITE);
     if (f) {
@@ -202,7 +234,6 @@ void loadCounterState() {
   File f = SD.open(COUNTER_FILE, FILE_READ);
   if (!f) return;
 
-  // Header überspringen
   String line = f.readStringUntil('\n');
   line.trim();
 
@@ -230,6 +261,7 @@ void loadCounterState() {
 // ===== Logging =====
 void ensureWaterLogFile() {
   if (!sdOK) return;
+
   if (!SD.exists(WATER_LOG_FILE)) {
     File f = SD.open(WATER_LOG_FILE, FILE_WRITE);
     if (f) {
@@ -241,8 +273,11 @@ void ensureWaterLogFile() {
 
 void logToSD(int peerIdx, uint32_t impulseBlock, uint32_t gesamtstand) {
   if (!sdOK) return;
+  if (!timeValid) return;
 
   String zeit = getTimeString();
+  if (zeit == "---") return;
+
   File f = SD.open(WATER_LOG_FILE, FILE_APPEND);
   if (f) {
     f.printf("%s;%s;%lu;%lu\n",
@@ -252,6 +287,12 @@ void logToSD(int peerIdx, uint32_t impulseBlock, uint32_t gesamtstand) {
              gesamtstand);
     f.close();
   }
+}
+
+void clearWaterLog() {
+  if (!sdOK) return;
+  SD.remove(WATER_LOG_FILE);
+  ensureWaterLogFile();
 }
 
 // ===== Touch lesen =====
@@ -330,7 +371,11 @@ void drawWrappedText(String text, int x, int y, int maxW, uint16_t color) {
 void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
   for (int i = 0; i < 3; i++) {
     if (memcmp(mac, peers[i].mac, 6) == 0) {
-      peers[i].online = (status == ESP_NOW_SEND_SUCCESS);
+      if (status == ESP_NOW_SEND_SUCCESS) {
+        // erfolgreicher Ping/Send an Peer => Gerät ist erreichbar
+        peers[i].lastSeen = millis();
+        peers[i].online = true;
+      }
     }
   }
 }
@@ -344,10 +389,9 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
   int idx = empfangen.peerID - 2;
   if (idx < 0 || idx >= 3) return;
 
-  // WICHTIG:
-  // Slave sendet Impulsblöcke / Differenzen.
-  // Darum hier AUFADDEN auf den Gesamtzähler.
   uint32_t impulseBlock = empfangen.zaehler;
+
+  // Slave sendet Differenzen / Impulsblöcke
   peers[idx].zaehler += impulseBlock;
   peers[idx].online = true;
   peers[idx].neuerWert = true;
@@ -363,107 +407,138 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
 }
 
 // ===== Browser =====
-String buildLogHtmlTable() {
-  if (!sdOK) return "<p>Keine SD-Karte verfügbar.</p>";
-
-  File f = SD.open(WATER_LOG_FILE, FILE_READ);
-  if (!f) return "<p>Kein Wasserlog vorhanden.</p>";
-
-  // Letzte 30 Zeilen puffern
-  const int MAX_LINES = 30;
-  String lines[MAX_LINES];
-  int count = 0;
-
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    line.trim();
-    if (line.length() > 0) {
-      lines[count % MAX_LINES] = line;
-      count++;
-    }
-  }
-  f.close();
-
-  String html = "<table style='width:100%;border-collapse:collapse;margin-top:20px'>";
-  html += "<tr>"
-          "<th style='text-align:left;border-bottom:1px solid #555;padding:6px'>Zeit</th>"
-          "<th style='text-align:left;border-bottom:1px solid #555;padding:6px'>Sensor</th>"
-          "<th style='text-align:right;border-bottom:1px solid #555;padding:6px'>Impulse</th>"
-          "<th style='text-align:right;border-bottom:1px solid #555;padding:6px'>Gesamt</th>"
-          "</tr>";
-
-  int start = (count > MAX_LINES) ? count - MAX_LINES : 0;
-  int shown = (count > MAX_LINES) ? MAX_LINES : count;
-
-  for (int i = 0; i < shown; i++) {
-    String row = lines[(start + i) % MAX_LINES];
-
-    int p1 = row.indexOf(';');
-    int p2 = row.indexOf(';', p1 + 1);
-    int p3 = row.indexOf(';', p2 + 1);
-
-    if (p1 < 0 || p2 < 0 || p3 < 0) continue;
-
-    String zeit   = row.substring(0, p1);
-    String sensor = row.substring(p1 + 1, p2);
-    String imp    = row.substring(p2 + 1, p3);
-    String gesamt = row.substring(p3 + 1);
-
-    html += "<tr>";
-    html += "<td style='padding:6px;border-bottom:1px solid #333'>" + htmlEscape(zeit) + "</td>";
-    html += "<td style='padding:6px;border-bottom:1px solid #333'>" + htmlEscape(sensor) + "</td>";
-    html += "<td style='padding:6px;border-bottom:1px solid #333;text-align:right'>" + htmlEscape(imp) + "</td>";
-    html += "<td style='padding:6px;border-bottom:1px solid #333;text-align:right'>" + htmlEscape(gesamt) + "</td>";
-    html += "</tr>";
-  }
-
-  html += "</table>";
-  return html;
-}
-
 void handleRoot() {
   String zeitstempel = getTimeString();
 
   String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
-    "<meta http-equiv='refresh' content='5'><title>WasserKontrolle</title>"
+    "<meta http-equiv='refresh' content='5'>"
+    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+    "<title>WasserKontrolle</title>"
     "<style>"
-    "body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px}"
-    "h1{text-align:center;color:#00d4ff}"
-    ".p{background:#16213e;border-radius:10px;padding:15px;margin:12px 0;display:flex;justify-content:space-between;align-items:center}"
-    ".on{border-left:4px solid #0f8}.off{border-left:4px solid #f44}"
-    ".n{font-weight:bold}.l{color:#00d4ff;font-size:1.2em;margin-top:6px}"
-    ".s{padding:6px 14px;border-radius:20px;font-weight:bold}"
-    ".son{background:#00ff8833;color:#0f8}.soff{background:#ff444433;color:#f44}"
-    "a{color:#8fd3ff}"
+    "body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px;margin:0}"
+    "h1{text-align:center;color:#00d4ff;margin-top:10px}"
+    ".sub{text-align:center;color:#aaa;font-size:0.9em;margin-bottom:20px}"
+    ".wrap{max-width:800px;margin:0 auto}"
+    ".card{background:#16213e;border-radius:12px;padding:16px;margin:14px 0;display:flex;justify-content:space-between;align-items:center}"
+    ".on{border-left:5px solid #00cc88}.off{border-left:5px solid #cc3344}"
+    ".name{font-weight:bold;font-size:1.05em}"
+    ".liter{color:#00d4ff;font-size:1.4em;margin-top:8px}"
+    ".status{padding:8px 14px;border-radius:18px;font-weight:bold;min-width:90px;text-align:center}"
+    ".statusOn{background:#00ff8833;color:#00ff99}"
+    ".statusOff{background:#ff444433;color:#ff6666}"
+    ".btnbar{text-align:center;margin:30px 0}"
+    ".btn{display:inline-block;margin:8px;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:bold}"
+    ".btn1{background:#1f6feb;color:white}"
+    ".btn2{background:#0f766e;color:white}"
+    ".btn3{background:#b91c1c;color:white}"
+    ".foot{text-align:center;color:#666;font-size:0.85em;margin-top:30px}"
     "</style></head><body>";
 
+  html += "<div class='wrap'>";
   html += "<h1>&#128167; WasserKontrolle</h1>";
-  html += "<div style='text-align:center;color:#aaa;font-size:0.9em'>Stand: " + zeitstempel + "</div>";
+  html += "<div class='sub'>Stand: " + zeitstempel + "</div>";
 
   for (int i = 0; i < 3; i++) {
-    const char* cls  = peers[i].online ? "on" : "off";
-    const char* txt  = peers[i].online ? "ONLINE" : "OFFLINE";
-    const char* scls = peers[i].online ? "son" : "soff";
+    bool isOnline = peerIsOnline(i);
+    const char* cardCls   = isOnline ? "on" : "off";
+    const char* statusCls = isOnline ? "status statusOn" : "status statusOff";
+    const char* statusTxt = isOnline ? "ONLINE" : "OFFLINE";
 
-    html += "<div class='p " + String(cls) + "'>";
-    html += "<div><div class='n'>" + String(peers[i].name) + "</div>";
-    html += "<div class='l'>" + String(peers[i].zaehler) + " Liter</div></div>";
-    html += "<span class='s " + String(scls) + "'>" + txt + "</span>";
+    html += "<div class='card " + String(cardCls) + "'>";
+    html += "<div>";
+    html += "<div class='name'>" + String(peers[i].name) + "</div>";
+    html += "<div class='liter'>" + String(peers[i].zaehler) + " Liter</div>";
+    html += "</div>";
+    html += "<div class='" + String(statusCls) + "'>" + String(statusTxt) + "</div>";
     html += "</div>";
   }
 
-  html += "<h2 style='margin-top:30px;color:#ffd166'>Letzte Wasserlog-Einträge</h2>";
-  html += buildLogHtmlTable();
+  html += "<div class='btnbar'>";
+  html += "<a class='btn btn1' href='/log'>CSV anzeigen</a>";
+  html += "<a class='btn btn2' href='/download'>CSV herunterladen</a>";
+  html += "<a class='btn btn3' href='/clearlog' onclick=\"return confirm('Wasserlog wirklich loeschen?');\">Log loeschen</a>";
+  html += "</div>";
 
-  html += "<div style='text-align:center;color:#555;margin-top:30px;font-size:0.85em'>"
-          "Auto-Refresh 5s | IP: " + WiFi.localIP().toString() + "</div>";
-
-  html += "</body></html>";
+  html += "<div class='foot'>Auto-Refresh 5s | IP: " + WiFi.localIP().toString() + "</div>";
+  html += "</div></body></html>";
 
   server.send(200, "text/html", html);
 }
 
-// ===== Hauptseite =====
+void handleLogPage() {
+  if (!sdOK) {
+    server.send(200, "text/html",
+      "<html><head><meta charset='UTF-8'></head><body>"
+      "<h2>Keine SD-Karte verfügbar</h2>"
+      "<p><a href='/'>Zurück</a></p>"
+      "</body></html>");
+    return;
+  }
+
+  File f = SD.open(WATER_LOG_FILE, FILE_READ);
+  if (!f) {
+    server.send(200, "text/html",
+      "<html><head><meta charset='UTF-8'></head><body>"
+      "<h2>Logdatei nicht gefunden</h2>"
+      "<p><a href='/'>Zurück</a></p>"
+      "</body></html>");
+    return;
+  }
+
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+                "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                "<title>Wasserlog CSV</title>"
+                "<style>"
+                "body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px}"
+                "h1{color:#00d4ff}"
+                "pre{background:#111;padding:15px;border-radius:10px;white-space:pre-wrap;word-wrap:break-word}"
+                "a{color:#8fd3ff}"
+                "</style></head><body>";
+
+  html += "<h1>Wasserlog CSV</h1>";
+  html += "<p><a href='/'>Zurück zur Hauptseite</a> | <a href='/download'>CSV herunterladen</a></p>";
+  html += "<pre>";
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    html += htmlEscape(line);
+    html += "\n";
+  }
+
+  html += "</pre></body></html>";
+  f.close();
+
+  server.send(200, "text/html", html);
+}
+
+void handleDownloadCSV() {
+  if (!sdOK) {
+    server.send(404, "text/plain", "Keine SD-Karte verfügbar");
+    return;
+  }
+
+  File f = SD.open(WATER_LOG_FILE, FILE_READ);
+  if (!f) {
+    server.send(404, "text/plain", "Logdatei nicht gefunden");
+    return;
+  }
+
+  server.sendHeader("Content-Type", "text/csv; charset=utf-8");
+  server.sendHeader("Content-Disposition", "attachment; filename=wasserlog.csv");
+  server.streamFile(f, "text/csv");
+  f.close();
+}
+
+void handleClearLog() {
+  if (sdOK) {
+    clearWaterLog();
+  }
+  server.sendHeader("Location", "/", true);
+  server.send(302, "text/plain", "");
+}
+
+// ===== Hauptseite TFT =====
 void drawMainPage() {
   tft.fillScreen(TFT_BLACK);
 
@@ -489,7 +564,8 @@ void drawMainPage() {
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawString(peers[i].name, 10, y);
 
-    uint16_t col = peers[i].online ? TFT_GREEN : TFT_RED;
+    bool isOnline = peerIsOnline(i);
+    uint16_t col = isOnline ? TFT_GREEN : TFT_RED;
     tft.fillCircle(300, y + 7, 7, col);
 
     tft.setTextFont(4);
@@ -500,7 +576,7 @@ void drawMainPage() {
 
     tft.setTextFont(2);
     tft.setTextColor(col, TFT_BLACK);
-    tft.drawString(peers[i].online ? "ON" : "OFF", 270, y + 26);
+    tft.drawString(isOnline ? "ON" : "OFF", 270, y + 26);
 
     if (i < 2) tft.drawFastHLine(10, y + 50, 300, TFT_DARKGREY);
   }
@@ -518,7 +594,8 @@ void drawMainPage() {
 void updatePeerStatus() {
   for (int i = 0; i < 3; i++) {
     int y = 56 + i * 55;
-    uint16_t col = peers[i].online ? TFT_GREEN : TFT_RED;
+    bool isOnline = peerIsOnline(i);
+    uint16_t col = isOnline ? TFT_GREEN : TFT_RED;
 
     tft.fillCircle(300, y + 7, 7, col);
 
@@ -533,7 +610,7 @@ void updatePeerStatus() {
     tft.fillRect(265, y + 26, 35, 16, TFT_BLACK);
     tft.setTextFont(2);
     tft.setTextColor(col, TFT_BLACK);
-    tft.drawString(peers[i].online ? "ON" : "OFF", 270, y + 26);
+    tft.drawString(isOnline ? "ON" : "OFF", 270, y + 26);
   }
 
   tft.fillRect(160, 225, 160, 10, TFT_BLACK);
@@ -597,7 +674,7 @@ void handleMainPage(int tx, int ty) {
   }
 }
 
-// ===== SD-LOG Seite =====
+// ===== SD-LOG TFT =====
 void drawSDLogPage() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TC_DATUM);
@@ -1016,7 +1093,7 @@ void setup() {
     Serial.println("SD-Karte FEHLER!");
   }
 
-  // WLAN AP+STA
+  // WLAN
   WiFi.mode(WIFI_AP_STA);
   Serial.printf("Verbinde mit WLAN: %s\n", ssid);
   WiFi.begin(ssid, wlanPass);
@@ -1034,7 +1111,21 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("WLAN OK! IP: %s\n", WiFi.localIP().toString().c_str());
+
     configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
+
+    // NTP etwas Zeit geben
+    for (int i = 0; i < 20; i++) {
+      checkTimeValid();
+      if (timeValid) break;
+      delay(500);
+    }
+
+    if (timeValid) {
+      Serial.printf("Zeit OK: %s\n", getTimeString().c_str());
+    } else {
+      Serial.println("Zeit noch nicht korrekt synchronisiert");
+    }
   } else {
     Serial.println("WLAN fehlgeschlagen!");
   }
@@ -1053,6 +1144,9 @@ void setup() {
 
   // Webserver
   server.on("/", handleRoot);
+  server.on("/log", handleLogPage);
+  server.on("/download", handleDownloadCSV);
+  server.on("/clearlog", handleClearLog);
   server.begin();
   Serial.println("Webserver OK");
 
@@ -1064,11 +1158,15 @@ void setup() {
 void loop() {
   server.handleClient();
 
+  // Uhrstatus zyklisch prüfen
+  if (millis() - lastClockCheck > 10000) {
+    lastClockCheck = millis();
+    checkTimeValid();
+  }
+
   // Offline-Erkennung
   for (int i = 0; i < 3; i++) {
-    if (peers[i].online && millis() - peers[i].lastSeen > 10000) {
-      peers[i].online = false;
-    }
+    peers[i].online = peerIsOnline(i);
   }
 
   int tx, ty;
