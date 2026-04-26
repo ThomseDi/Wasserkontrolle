@@ -260,6 +260,9 @@ void loadEntkalkerState() {
     if (key == "alarm")     entkalkerAlarm     = (val.toInt() != 0);
   }
   f.close();
+
+  // Entkalker-Anzeige auf Hauptseite mit dem Wechselzaehler synchron halten
+  peers[1].zaehler = entkalkerVerbrauch;
 }
 
 void resetEntkalker() {
@@ -267,6 +270,8 @@ void resetEntkalker() {
   entkalkerAlarm      = false;
   lastEntkalkerPushMillis = 0;
   saveEntkalkerState();
+  peers[1].zaehler = 0;
+  saveCounterState();
 }
 
 void checkEntkalkerAlarm() {
@@ -324,6 +329,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
   // Entkalker-Verbrauch tracken (Peer 1 = Entkalkeruhr)
   if (idx == 1 && impulseBlock > 0) {
     entkalkerVerbrauch += impulseBlock;
+    peers[idx].zaehler = entkalkerVerbrauch;
     if (!entkalkerAlarm && entkalkerVerbrauch >= entkalkerGrenzwert) {
       entkalkerAlarm = true;
     }
