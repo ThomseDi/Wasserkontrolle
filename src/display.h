@@ -17,6 +17,7 @@ void drawFilesPage();
 void drawViewPage();
 void drawSDLogPage();
 void drawOffsetPage();
+void drawEntkalkerPage();
 void loadFileList();
 
 // Handler
@@ -26,3 +27,4 @@ void handleFilesPage(int tx, int ty);
 void handleViewPage(int tx, int ty);
 void handleSDLogPage(int tx, int ty);
 void handleOffsetPage(int tx, int ty);
+void handleEntkalkerPage(int tx, int ty);

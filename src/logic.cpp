@@ -56,9 +56,16 @@ PeerInfo peers[3] = {
 unsigned long lastNightAlarmMillis = 0;
 
 // ===== Dauerlauf-Alarm =====
-static unsigned long haupt_flussStart        = 0; // wann Dauerfluss begann (0 = kein Fluss)
-static unsigned long haupt_flussZuletzt      = 0; // letzter Impuls von Hauptwasseruhr
+static unsigned long haupt_flussStart        = 0;
+static unsigned long haupt_flussZuletzt      = 0;
 static unsigned long lastDauerlaufAlarmMillis = 0;
+
+// ===== Entkalker-Alarm =====
+const char* ENTKALKER_FILE = "/entkalker.csv";
+uint32_t entkalkerVerbrauch = 0;
+uint32_t entkalkerGrenzwert = 1500;
+bool     entkalkerAlarm     = false;
+static unsigned long lastEntkalkerPushMillis = 0;
 
 // ===== Hilfsfunktionen =====
 String htmlEscape(const String &s) {
@@ -225,6 +232,56 @@ void clearWaterLog() {
   ensureWaterLogFile();
 }
 
+// ===== Entkalker SD =====
+void saveEntkalkerState() {
+  if (!sdOK) return;
+  SD.remove(ENTKALKER_FILE);
+  File f = SD.open(ENTKALKER_FILE, FILE_WRITE);
+  if (!f) return;
+  f.printf("verbrauch;%lu\n", entkalkerVerbrauch);
+  f.printf("grenzwert;%lu\n", entkalkerGrenzwert);
+  f.printf("alarm;%d\n", (int)entkalkerAlarm);
+  f.close();
+}
+
+void loadEntkalkerState() {
+  if (!sdOK) return;
+  File f = SD.open(ENTKALKER_FILE, FILE_READ);
+  if (!f) return;
+  while (f.available()) {
+    String row = f.readStringUntil('\n');
+    row.trim();
+    int sep = row.indexOf(';');
+    if (sep < 0) continue;
+    String key = row.substring(0, sep);
+    String val = row.substring(sep + 1);
+    if (key == "verbrauch") entkalkerVerbrauch = (uint32_t)val.toInt();
+    if (key == "grenzwert") entkalkerGrenzwert = (uint32_t)val.toInt();
+    if (key == "alarm")     entkalkerAlarm     = (val.toInt() != 0);
+  }
+  f.close();
+}
+
+void resetEntkalker() {
+  entkalkerVerbrauch  = 0;
+  entkalkerAlarm      = false;
+  lastEntkalkerPushMillis = 0;
+  saveEntkalkerState();
+}
+
+void checkEntkalkerAlarm() {
+  if (!entkalkerAlarm) return;
+
+  const bool cooldownPassed =
+    (lastEntkalkerPushMillis == 0) ||
+    (millis() - lastEntkalkerPushMillis >= 86400000UL); // 1x pro Tag
+
+  if (cooldownPassed) {
+    sendPushover("ACHTUNG: Entkalker wechseln!");
+    lastEntkalkerPushMillis = millis();
+  }
+}
+
 // ===== ESP-NOW =====
 void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
   for (int i = 0; i < 3; i++) {
@@ -262,6 +319,15 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
   if (idx == 0 && impulseBlock > 0) {
     if (haupt_flussStart == 0) haupt_flussStart = millis();
     haupt_flussZuletzt = millis();
+  }
+
+  // Entkalker-Verbrauch tracken (Peer 1 = Entkalkeruhr)
+  if (idx == 1 && impulseBlock > 0) {
+    entkalkerVerbrauch += impulseBlock;
+    if (!entkalkerAlarm && entkalkerVerbrauch >= entkalkerGrenzwert) {
+      entkalkerAlarm = true;
+    }
+    saveEntkalkerState();
   }
 
   if (impulseBlock > 0 && timeValid) {
@@ -339,6 +405,7 @@ void initSDCard() {
     ensureWaterLogFile();
     ensureCounterFile();
     loadCounterState();
+    loadEntkalkerState();
     Serial.println("Zählerstände geladen");
   } else {
     sdOK = false;

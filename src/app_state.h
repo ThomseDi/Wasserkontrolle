@@ -57,9 +57,15 @@ enum Page {
   PAGE_FILES,
   PAGE_VIEW,
   PAGE_SDLOG,
-  PAGE_OFFSET
+  PAGE_OFFSET,
+  PAGE_ENTKALKER
 };
 extern Page currentPage;
+
+// ===== Entkalker-Alarm =====
+extern uint32_t entkalkerVerbrauch;   // Liter seit letztem Wechsel
+extern uint32_t entkalkerGrenzwert;   // Alarm-Grenzwert in Litern
+extern bool     entkalkerAlarm;
 
 // ===== Texteingabe =====
 extern String inputText;

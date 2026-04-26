@@ -25,6 +25,12 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len);
 // Dauerlauf-Alarm
 void checkDauerlaufAlarm();
 
+// Entkalker-Alarm
+void saveEntkalkerState();
+void loadEntkalkerState();
+void resetEntkalker();
+void checkEntkalkerAlarm();
+
 // Initialisierung
 void initDisplayAndTouch();
 void initSDCard();

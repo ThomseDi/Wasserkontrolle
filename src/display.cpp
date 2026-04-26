@@ -86,7 +86,7 @@ void drawMainPage() {
   drawBtnBig(70,  20, 60, 28, "NOTIZ",   0x0400);
   drawBtnBig(135, 20, 60, 28, "DATEIEN", 0x000A);
   drawBtnBig(200, 20, 60, 28, "SD LOG",  TFT_NAVY);
-  drawBtnBig(265, 20, 50, 28, "DEL",     TFT_MAROON);
+  drawBtnBig(265, 20, 50, 28, "ENTK",    0x7800);
 
   tft.drawFastHLine(0, 52, 320, TFT_DARKGREY);
 
@@ -123,6 +123,15 @@ void drawMainPage() {
   }
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.drawString(getTimeString(), 160, 225);
+
+  // Entkalker-Alarm-Anzeige
+  if (entkalkerAlarm) {
+    tft.fillRect(0, 213, 320, 12, TFT_ORANGE);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextFont(1);
+    tft.setTextColor(TFT_BLACK, TFT_ORANGE);
+    tft.drawString("ACHTUNG: Entkalker wechseln!", 160, 219);
+  }
 }
 
 void updatePeerStatus() {
@@ -224,17 +233,7 @@ void handleMainPage(int tx, int ty) {
   }
 
   if (btnHit(265, 20, 50, 28, tx, ty)) {
-    File root = SD.open("/");
-    if (root) {
-      File entry;
-      while ((entry = root.openNextFile())) {
-        String name = "/" + String(entry.name());
-        entry.close();
-        if (name.endsWith(".txt")) SD.remove(name.c_str());
-      }
-      root.close();
-    }
-    drawMainPage();
+    currentPage = PAGE_ENTKALKER;
     return;
   }
 }
@@ -355,7 +354,73 @@ void handleSDLogPage(int tx, int ty) {
   }
 }
 
-// ===== Keyboard =====
+// ===== Entkalker-Seite =====
+void drawEntkalkerPage() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("Entkalker-Einstellung", 160, 5);
+  drawBtn(255, 5, 60, 18, "ZURUECK", TFT_RED);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  char buf[40];
+  snprintf(buf, sizeof(buf), "Verbrauch: %lu L", entkalkerVerbrauch);
+  tft.drawString(buf, 10, 30);
+  snprintf(buf, sizeof(buf), "Grenzwert: %lu L", entkalkerGrenzwert);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString(buf, 10, 52);
+
+  if (entkalkerAlarm) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("! ALARM AKTIV !", 10, 74);
+  }
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(1);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("Grenzwert waehlen:", 10, 100);
+
+  drawBtn(10,  118, 68, 26, "300 L",  0x0010);
+  drawBtn(84,  118, 68, 26, "500 L",  0x0010);
+  drawBtn(158, 118, 68, 26, "800 L",  0x0010);
+  drawBtn(232, 118, 68, 26, "1000 L", 0x0010);
+  drawBtn(10,  150, 68, 26, "1200 L", 0x0010);
+  drawBtn(84,  150, 68, 26, "1500 L", 0x0010);
+  drawBtn(158, 150, 68, 26, "2000 L", 0x0010);
+  drawBtn(232, 150, 68, 26, "2500 L", 0x0010);
+
+  drawBtn(10, 190, 300, 30, "Entkalker gewechselt / Reset", TFT_GREEN);
+}
+
+void handleEntkalkerPage(int tx, int ty) {
+  if (btnHit(255, 5, 60, 18, tx, ty)) {
+    currentPage = PAGE_MAIN;
+    return;
+  }
+
+  // Grenzwert-Buttons
+  const uint32_t werte[] = {300, 500, 800, 1000, 1200, 1500, 2000, 2500};
+  const int bx[] = {10, 84, 158, 232, 10, 84, 158, 232};
+  const int by[] = {118, 118, 118, 118, 150, 150, 150, 150};
+  for (int i = 0; i < 8; i++) {
+    if (btnHit(bx[i], by[i], 68, 26, tx, ty)) {
+      entkalkerGrenzwert = werte[i];
+      saveEntkalkerState();
+      drawEntkalkerPage();
+      return;
+    }
+  }
+
+  // Reset
+  if (btnHit(10, 190, 300, 30, tx, ty)) {
+    resetEntkalker();
+    drawEntkalkerPage();
+    return;
+  }
+}
 void drawKeyboardPage() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);

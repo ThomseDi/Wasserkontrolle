@@ -35,6 +35,7 @@ void loop() {
   }
 
   checkDauerlaufAlarm();
+  checkEntkalkerAlarm();
 
   for (int i = 0; i < 3; i++) {
     peers[i].online = peerIsOnline(i);
@@ -51,6 +52,7 @@ void loop() {
       case PAGE_VIEW:     handleViewPage(tx, ty); break;
       case PAGE_SDLOG:    handleSDLogPage(tx, ty); break;
       case PAGE_OFFSET:   handleOffsetPage(tx, ty); break;
+      case PAGE_ENTKALKER: handleEntkalkerPage(tx, ty); break;
     }
 
     static Page lastPage = PAGE_MAIN;
@@ -62,6 +64,7 @@ void loop() {
         case PAGE_VIEW:     drawViewPage(); break;
         case PAGE_SDLOG:    drawSDLogPage(); break;
         case PAGE_OFFSET:   drawOffsetPage(); break;
+        case PAGE_ENTKALKER: drawEntkalkerPage(); break;
       }
       lastPage = currentPage;
     }
