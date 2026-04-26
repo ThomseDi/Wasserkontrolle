@@ -34,6 +34,8 @@ void loop() {
     checkTimeValid();
   }
 
+  checkDauerlaufAlarm();
+
   for (int i = 0; i < 3; i++) {
     peers[i].online = peerIsOnline(i);
   }

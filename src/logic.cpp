@@ -1,5 +1,6 @@
 #include "logic.h"
 #include "web.h"
+#include "notification.h"
 
 // ===== Definitionen globaler Variablen =====
 const char* ssid     = "6360Achalmstr";
@@ -51,6 +52,13 @@ PeerInfo peers[3] = {
   {"Entkalkeruhr",   mac_entkalker, false, 0, false, 0},
   {"(offen)",        mac_offen, false, 0, false, 0}
 };
+
+unsigned long lastNightAlarmMillis = 0;
+
+// ===== Dauerlauf-Alarm =====
+static unsigned long haupt_flussStart        = 0; // wann Dauerfluss begann (0 = kein Fluss)
+static unsigned long haupt_flussZuletzt      = 0; // letzter Impuls von Hauptwasseruhr
+static unsigned long lastDauerlaufAlarmMillis = 0;
 
 // ===== Hilfsfunktionen =====
 String htmlEscape(const String &s) {
@@ -250,8 +258,60 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
                 impulseBlock,
                 peers[idx].zaehler);
 
+  // Dauerlauf-Tracking für Hauptwasseruhr (Peer 0)
+  if (idx == 0 && impulseBlock > 0) {
+    if (haupt_flussStart == 0) haupt_flussStart = millis();
+    haupt_flussZuletzt = millis();
+  }
+
+  if (impulseBlock > 0 && timeValid) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      const bool isNightWindow = (timeinfo.tm_hour >= 1 && timeinfo.tm_hour < 5);
+      const bool cooldownPassed =
+        (lastNightAlarmMillis == 0) ||
+        (millis() - lastNightAlarmMillis >= 600000UL);
+
+      if (isNightWindow && cooldownPassed) {
+        sendPushover("WASSERALARM NACHT - Wasser laeuft!");
+        lastNightAlarmMillis = millis();
+      }
+    }
+  }
+
   logToSD(idx, impulseBlock, peers[idx].zaehler);
   saveCounterState();
+}
+
+void checkDauerlaufAlarm() {
+  if (haupt_flussStart == 0) return;
+
+  // Kein Impuls seit 90 Sekunden => Fluss gestoppt
+  if (millis() - haupt_flussZuletzt > 90000UL) {
+    haupt_flussStart  = 0;
+    haupt_flussZuletzt = 0;
+    return;
+  }
+
+  // Noch keine 20 Minuten Dauerfluss
+  if (millis() - haupt_flussStart < 1200000UL) return;
+
+  // Cooldown 10 Minuten
+  const bool cooldownPassed =
+    (lastDauerlaufAlarmMillis == 0) ||
+    (millis() - lastDauerlaufAlarmMillis >= 600000UL);
+  if (!cooldownPassed) return;
+
+  // Display-Alarm
+  tft.fillRect(0, 200, 320, 40, TFT_RED);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_WHITE, TFT_RED);
+  tft.drawString("ALARM: Wasser laeuft seit 20 Min!", 160, 220);
+
+  // Pushover
+  sendPushover("ALARM: Wasser laeuft seit 20 Minuten - moeglicher Wasserbruch!");
+  lastDauerlaufAlarmMillis = millis();
 }
 
 // ===== Initialisierung =====

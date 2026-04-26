@@ -22,6 +22,9 @@ void clearWaterLog();
 void onDataSent(const uint8_t *mac, esp_now_send_status_t status);
 void onDataRecv(const uint8_t *mac, const uint8_t *data, int len);
 
+// Dauerlauf-Alarm
+void checkDauerlaufAlarm();
+
 // Initialisierung
 void initDisplayAndTouch();
 void initSDCard();
