@@ -33,15 +33,11 @@ extern const char* COUNTER_FILE;
 extern const time_t MIN_VALID_TIME;
 
 // ===== SPI / Hardware =====
-extern SPIClass touchSPI;
 extern TFT_eSPI tft;
 extern SPIClass sdSPI;
 extern WebServer server;
 
-// XPT2046 mit VSPI-Trick
-#define SPI touchSPI
 #include <XPT2046_Touchscreen.h>
-#undef SPI
 extern XPT2046_Touchscreen ts;
 
 // ===== Status =====

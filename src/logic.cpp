@@ -9,7 +9,6 @@ const char* WATER_LOG_FILE = "/wasserlog.csv";
 const char* COUNTER_FILE   = "/zaehlerstaende.csv";
 const time_t MIN_VALID_TIME = 1776000000;
 
-SPIClass touchSPI(VSPI);
 TFT_eSPI tft = TFT_eSPI();
 SPIClass sdSPI(HSPI);
 XPT2046_Touchscreen ts(TOUCH_CS, 255);
@@ -265,7 +264,7 @@ void initDisplayAndTouch() {
   tft.fillScreen(TFT_BLACK);
   Serial.println("Display OK");
 
-  touchSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
+  SPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
   ts.begin();
   ts.setRotation(1);
   Serial.println("Touch OK");
