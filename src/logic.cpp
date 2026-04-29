@@ -3,8 +3,8 @@
 #include "notification.h"
 
 // ===== Definitionen globaler Variablen =====
-const char* ssid     = "6360Achalmstr";
-const char* wlanPass = "mostkrug2011";
+const char* ssid     = "MOSTKRUG2.4";
+const char* wlanPass = "mostkrug2025";
 
 const char* WATER_LOG_FILE = "/wasserlog.csv";
 const char* COUNTER_FILE   = "/zaehlerstaende.csv";
@@ -66,6 +66,7 @@ uint32_t entkalkerVerbrauch = 0;
 uint32_t entkalkerGrenzwert = 1500;
 bool     entkalkerAlarm     = false;
 static unsigned long lastEntkalkerPushMillis = 0;
+static uint32_t entkalkerHalbImpulse = 0;  // Akkumulator für halbe Impulse (2 Impulse = 1 Liter)
 
 // ===== Hilfsfunktionen =====
 String htmlEscape(const String &s) {
@@ -327,13 +328,19 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
   }
 
   // Entkalker-Verbrauch tracken (Peer 1 = Entkalkeruhr)
+  // Nur die Hälfte der Impulse zählen: 2 Impulse = 1 Liter
   if (idx == 1 && impulseBlock > 0) {
-    entkalkerVerbrauch += impulseBlock;
-    peers[idx].zaehler = entkalkerVerbrauch;
-    if (!entkalkerAlarm && entkalkerVerbrauch >= entkalkerGrenzwert) {
-      entkalkerAlarm = true;
+    entkalkerHalbImpulse += impulseBlock;
+    uint32_t ganzeImpulse = entkalkerHalbImpulse / 2;
+    entkalkerHalbImpulse %= 2;
+    if (ganzeImpulse > 0) {
+      entkalkerVerbrauch += ganzeImpulse;
+      peers[idx].zaehler = entkalkerVerbrauch;
+      if (!entkalkerAlarm && entkalkerVerbrauch >= entkalkerGrenzwert) {
+        entkalkerAlarm = true;
+      }
+      saveEntkalkerState();
     }
-    saveEntkalkerState();
   }
 
   if (impulseBlock > 0 && timeValid) {
