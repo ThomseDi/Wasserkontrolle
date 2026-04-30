@@ -3,6 +3,7 @@
 #include "logic.h"
 #include "display.h"
 #include "web.h"
+#include "ota_update.h"
 
 void setup() {
   delay(2000);
@@ -19,6 +20,7 @@ void setup() {
   tft.drawString("Verbinde mit WLAN...", 160, 120);
 
   initWiFiAndTime();
+  initOTA();
   initEspNow();
   initWebServer();
 
@@ -27,6 +29,7 @@ void setup() {
 }
 
 void loop() {
+  handleOTA();
   server.handleClient();
 
   if (millis() - lastClockCheck > 10000) {
