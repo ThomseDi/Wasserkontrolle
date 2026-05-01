@@ -1,7 +1,7 @@
 #include "display.h"
 #include "logic.h"
 
-#define FW_VERSION "v1.01"
+#define FW_VERSION "v1.05"
 
 // ===== Touch lesen =====
 bool getTouch(int &tx, int &ty) {
@@ -238,7 +238,6 @@ void handleMainPage(int tx, int ty) {
     currentPage = PAGE_ENTKALKER;
     return;
   }
-
 }
 
 void handleOffsetPage(int tx, int ty) {
@@ -429,7 +428,9 @@ void drawKeyboardPage() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("Neue Notiz eingeben:", 5, 5);
+  if      (keyboardContext == KBCTX_STARTUP_SSID) tft.drawString("WLAN-Name eingeben:", 5, 5);
+  else if (keyboardContext == KBCTX_STARTUP_PASS)  tft.drawString("WLAN-Passwort eingeben:", 5, 5);
+  else                                             tft.drawString("Neue Notiz eingeben:", 5, 5);
 
   tft.fillRect(5, 20, 310, 30, TFT_DARKGREY);
   tft.drawRect(5, 20, 310, 30, TFT_WHITE);
@@ -480,7 +481,8 @@ void drawNumberPage() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("Neue Notiz eingeben:", 5, 5);
+  if (keyboardContext == KBCTX_STARTUP_IP) tft.drawString("Start-IP eingeben (Pflicht):", 5, 5);
+  else                                     tft.drawString("Neue Notiz eingeben:", 5, 5);
 
   tft.fillRect(5, 20, 310, 30, TFT_DARKGREY);
   tft.drawRect(5, 20, 310, 30, TFT_WHITE);
@@ -522,6 +524,41 @@ void drawNumberPage() {
 
 void handleKeyboardPage(int tx, int ty) {
   if (btnHit(5, 58, 50, 30, tx, ty)) {
+    if (keyboardContext == KBCTX_STARTUP_SSID) {
+      if (inputText.length() > 0) {
+        startupSSID = inputText;
+        keyboardContext = KBCTX_NONE;
+        currentPage = PAGE_MAIN;
+      } else {
+        tft.fillRect(5, 52, 310, 10, TFT_BLACK);
+        tft.setTextDatum(TL_DATUM);
+        tft.setTextFont(1);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawString("WLAN-Name darf nicht leer sein!", 5, 53);
+      }
+      return;
+    }
+    if (keyboardContext == KBCTX_STARTUP_PASS) {
+      startupPass = inputText;
+      keyboardContext = KBCTX_NONE;
+      currentPage = PAGE_MAIN;
+      return;
+    }
+    if (keyboardContext == KBCTX_STARTUP_IP) {
+      if (isValidIPv4(inputText)) {
+        startupStaticIP = inputText;
+        keyboardContext = KBCTX_NONE;
+        currentPage = PAGE_MAIN;
+      } else {
+        tft.fillRect(5, 52, 310, 10, TFT_BLACK);
+        tft.setTextDatum(TL_DATUM);
+        tft.setTextFont(1);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawString("Ungueltige IP, z.B. 192.168.1.187", 5, 53);
+      }
+      return;
+    }
+
     if (inputText.length() > 0) {
       int num = nextFileNumber();
       char fname[20];
@@ -538,6 +575,14 @@ void handleKeyboardPage(int tx, int ty) {
   }
 
   if (btnHit(60, 58, 60, 30, tx, ty)) {
+    if (keyboardContext == KBCTX_STARTUP_SSID || keyboardContext == KBCTX_STARTUP_PASS) {
+      drawKeyboardPage();
+      return;
+    }
+    if (keyboardContext == KBCTX_STARTUP_IP) {
+      drawNumberPage();
+      return;
+    }
     currentPage = PAGE_MAIN;
     return;
   }
@@ -555,6 +600,15 @@ void handleKeyboardPage(int tx, int ty) {
   }
 
   if (btnHit(225, 58, 40, 30, tx, ty)) {
+    if (keyboardContext == KBCTX_STARTUP_IP) {
+      drawNumberPage();
+      return;
+    }
+    if (keyboardContext == KBCTX_STARTUP_SSID || keyboardContext == KBCTX_STARTUP_PASS) {
+      shiftOn = !shiftOn;
+      drawKeyboardPage();
+      return;
+    }
     if (numMode) {
       numMode = false;
       drawKeyboardPage();
@@ -566,6 +620,11 @@ void handleKeyboardPage(int tx, int ty) {
   }
 
   if (btnHit(270, 58, 45, 30, tx, ty)) {
+    if (keyboardContext == KBCTX_STARTUP_IP || keyboardContext == KBCTX_STARTUP_SSID || keyboardContext == KBCTX_STARTUP_PASS) {
+      numMode = true;
+      drawNumberPage();
+      return;
+    }
     numMode = !numMode;
     if (numMode) drawNumberPage(); else drawKeyboardPage();
     return;

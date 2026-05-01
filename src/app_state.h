@@ -26,6 +26,15 @@
 // ===== WLAN =====
 extern const char* ssid;
 extern const char* wlanPass;
+extern String startupStaticIP;
+extern String startupSSID;
+extern String startupPass;
+extern int keyboardContext;
+
+#define KBCTX_NONE 0
+#define KBCTX_STARTUP_IP   1
+#define KBCTX_STARTUP_SSID 2
+#define KBCTX_STARTUP_PASS 3
 
 // ===== Dateien =====
 extern const char* WATER_LOG_FILE;

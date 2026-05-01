@@ -12,6 +12,57 @@ void setup() {
   Serial.println("\n=== WasserKontrolle ===\n");
 
   initDisplayAndTouch();
+
+  // Pflichtschritt 1: WLAN-Name eingeben
+  keyboardContext = KBCTX_STARTUP_SSID;
+  numMode = false;
+  shiftOn = false;
+  currentPage = PAGE_KEYBOARD;
+  inputText = startupSSID;
+  drawKeyboardPage();
+
+  while (keyboardContext == KBCTX_STARTUP_SSID) {
+    int tx, ty;
+    if (getTouch(tx, ty) && millis() - lastTouch > 200) {
+      lastTouch = millis();
+      handleKeyboardPage(tx, ty);
+    }
+    delay(20);
+  }
+
+  // Pflichtschritt 2: WLAN-Passwort eingeben
+  keyboardContext = KBCTX_STARTUP_PASS;
+  numMode = false;
+  shiftOn = false;
+  currentPage = PAGE_KEYBOARD;
+  inputText = startupPass;
+  drawKeyboardPage();
+
+  while (keyboardContext == KBCTX_STARTUP_PASS) {
+    int tx, ty;
+    if (getTouch(tx, ty) && millis() - lastTouch > 200) {
+      lastTouch = millis();
+      handleKeyboardPage(tx, ty);
+    }
+    delay(20);
+  }
+
+  // Pflichtschritt 3: statische IP eingeben
+  keyboardContext = KBCTX_STARTUP_IP;
+  numMode = true;
+  currentPage = PAGE_KEYBOARD;
+  inputText = startupStaticIP;
+  drawNumberPage();
+
+  while (keyboardContext == KBCTX_STARTUP_IP) {
+    int tx, ty;
+    if (getTouch(tx, ty) && millis() - lastTouch > 200) {
+      lastTouch = millis();
+      handleKeyboardPage(tx, ty);
+    }
+    delay(20);
+  }
+
   initSDCard();
 
   tft.setTextDatum(MC_DATUM);

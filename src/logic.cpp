@@ -5,6 +5,8 @@
 // ===== Definitionen globaler Variablen =====
 const char* ssid     = "6360Achalmstr";
 const char* wlanPass = "mostkrug2011";
+String startupSSID = "6360Achalmstr";
+String startupPass = "mostkrug2011";
 
 const char* WATER_LOG_FILE = "/wasserlog.csv";
 const char* COUNTER_FILE   = "/zaehlerstaende.csv";
@@ -20,6 +22,8 @@ bool lastTouched = false;
 unsigned long lastTouch = 0;
 bool timeValid = false;
 unsigned long lastClockCheck = 0;
+String startupStaticIP = "192.168.1.187";
+int keyboardContext = KBCTX_NONE;
 
 int16_t calX0 = 300, calY0 = 300, calX1 = 3800, calY1 = 3800;
 
@@ -104,6 +108,19 @@ int nextFileNumber() {
     if (!SD.exists(fname)) return i;
   }
   return 999;
+}
+
+bool isValidIPv4(const String &ip) {
+  IPAddress out;
+  return out.fromString(ip);
+}
+
+String gatewayFromIP(const String &ip) {
+  int p1 = ip.indexOf('.');
+  int p2 = ip.indexOf('.', p1 + 1);
+  int p3 = ip.indexOf('.', p2 + 1);
+  if (p1 < 0 || p2 < 0 || p3 < 0) return "";
+  return ip.substring(0, p3) + ".1";
 }
 
 void checkTimeValid() {
@@ -429,8 +446,13 @@ void initSDCard() {
 
 void initWiFiAndTime() {
   WiFi.mode(WIFI_AP_STA);
-  Serial.printf("Verbinde mit WLAN: %s\n", ssid);
-  WiFi.begin(ssid, wlanPass);
+  IPAddress ipAddr, gwAddr, subnet(255, 255, 255, 0);
+  if (isValidIPv4(startupStaticIP) && gwAddr.fromString(gatewayFromIP(startupStaticIP)) && ipAddr.fromString(startupStaticIP)) {
+    WiFi.config(ipAddr, gwAddr, subnet, gwAddr);
+    Serial.printf("Statische IP gesetzt: %s (GW %s)\n", startupStaticIP.c_str(), gwAddr.toString().c_str());
+  }
+  Serial.printf("Verbinde mit WLAN: %s\n", startupSSID.c_str());
+  WiFi.begin(startupSSID.c_str(), startupPass.c_str());
 
   int timeout = 0;
   while (WiFi.status() != WL_CONNECTED && timeout < 20) {
