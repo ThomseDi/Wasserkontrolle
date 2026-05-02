@@ -9,6 +9,8 @@ bool peerIsOnline(int i);
 uint8_t getWiFiChannel();
 void addPeer(uint8_t *mac);
 int nextFileNumber();
+bool isValidIPv4(const String &ip);
+String gatewayFromIP(const String &ip);
 
 // Zähler / SD
 void ensureCounterFile();
@@ -23,6 +25,7 @@ void onDataSent(const uint8_t *mac, esp_now_send_status_t status);
 void onDataRecv(const uint8_t *mac, const uint8_t *data, int len);
 
 // Dauerlauf-Alarm
+void checkAndReconnectWiFi();
 void checkDauerlaufAlarm();
 
 // Entkalker-Alarm

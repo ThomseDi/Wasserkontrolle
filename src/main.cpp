@@ -5,6 +5,32 @@
 #include "web.h"
 #include "ota_update.h"
 
+static void drawStartupProfilePage() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("WLAN-Profil waehlen", 160, 12);
+
+  drawBtnBig(15, 40, 140, 45, "PROFIL 1", TFT_DARKGREEN);
+  drawBtnBig(165, 40, 140, 45, "PROFIL 2", TFT_NAVY);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("P1: MOSTKRUG2.4", 15, 95);
+  tft.drawString("PW: mostkrug2025", 15, 107);
+  tft.drawString("IP: 192.168.2.75", 15, 119);
+
+  tft.drawString("P2: 6360Achalmstr", 165, 95);
+  tft.drawString("PW: mostkrug2011", 165, 107);
+  tft.drawString("IP: 192.168.1.187", 165, 119);
+
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("Danach koennen SSID/Pass/IP noch geaendert werden.", 12, 150);
+  tft.drawString("Tippe auf PROFIL 1 oder PROFIL 2.", 12, 164);
+}
+
 void setup() {
   delay(2000);
   Serial.begin(115200);
@@ -12,6 +38,29 @@ void setup() {
   Serial.println("\n=== WasserKontrolle ===\n");
 
   initDisplayAndTouch();
+
+  // Pflichtschritt 0: WLAN-Profil am TFT auswaehlen
+  drawStartupProfilePage();
+  bool profileSelected = false;
+  while (!profileSelected) {
+    int tx, ty;
+    if (getTouch(tx, ty) && millis() - lastTouch > 200) {
+      lastTouch = millis();
+
+      if (btnHit(15, 40, 140, 45, tx, ty)) {
+        startupSSID = "MOSTKRUG2.4";
+        startupPass = "mostkrug2025";
+        startupStaticIP = "192.168.2.75";
+        profileSelected = true;
+      } else if (btnHit(165, 40, 140, 45, tx, ty)) {
+        startupSSID = "6360Achalmstr";
+        startupPass = "mostkrug2011";
+        startupStaticIP = "192.168.1.187";
+        profileSelected = true;
+      }
+    }
+    delay(20);
+  }
 
   // Pflichtschritt 1: WLAN-Name eingeben
   keyboardContext = KBCTX_STARTUP_SSID;
@@ -82,6 +131,7 @@ void setup() {
 void loop() {
   handleOTA();
   server.handleClient();
+  checkAndReconnectWiFi();
 
   if (millis() - lastClockCheck > 10000) {
     lastClockCheck = millis();

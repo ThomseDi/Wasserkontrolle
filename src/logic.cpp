@@ -3,10 +3,13 @@
 #include "notification.h"
 
 // ===== Definitionen globaler Variablen =====
-const char* ssid     = "6360Achalmstr";
-const char* wlanPass = "mostkrug2011";
-String startupSSID = "6360Achalmstr";
-String startupPass = "mostkrug2011";
+const char* ssid     = "MOSTKRUG2.4";
+const char* wlanPass = "mostkrug2025";
+String startupSSID = "MOSTKRUG2.4";
+String startupPass = "mostkrug2025";
+const char* fallbackSSID = "6360Achalmstr";
+const char* fallbackPass = "mostkrug2011";
+const char* fallbackIP   = "192.168.1.187";
 
 const char* WATER_LOG_FILE = "/wasserlog.csv";
 const char* COUNTER_FILE   = "/zaehlerstaende.csv";
@@ -22,7 +25,7 @@ bool lastTouched = false;
 unsigned long lastTouch = 0;
 bool timeValid = false;
 unsigned long lastClockCheck = 0;
-String startupStaticIP = "192.168.1.187";
+String startupStaticIP = "192.168.2.75";
 int keyboardContext = KBCTX_NONE;
 
 int16_t calX0 = 300, calY0 = 300, calX1 = 3800, calY1 = 3800;
@@ -63,6 +66,9 @@ unsigned long lastNightAlarmMillis = 0;
 static unsigned long haupt_flussStart        = 0;
 static unsigned long haupt_flussZuletzt      = 0;
 static unsigned long lastDauerlaufAlarmMillis = 0;
+static uint32_t hauptPendingImpulse = 0;
+static unsigned long hauptPendingSince = 0;
+static unsigned long hauptLastRecvMillis = 0;
 
 // ===== Entkalker-Alarm =====
 const char* ENTKALKER_FILE = "/entkalker.csv";
@@ -121,6 +127,37 @@ String gatewayFromIP(const String &ip) {
   int p3 = ip.indexOf('.', p2 + 1);
   if (p1 < 0 || p2 < 0 || p3 < 0) return "";
   return ip.substring(0, p3) + ".1";
+}
+
+bool connectWiFiProfile(const String &cfgSSID, const String &cfgPass, const String &cfgIP, bool applyAsActiveProfile) {
+  WiFi.disconnect(true);
+  delay(200);
+  WiFi.mode(WIFI_AP_STA);
+
+  IPAddress ipAddr, gwAddr, subnet(255, 255, 255, 0);
+  if (isValidIPv4(cfgIP) && gwAddr.fromString(gatewayFromIP(cfgIP)) && ipAddr.fromString(cfgIP)) {
+    WiFi.config(ipAddr, gwAddr, subnet, gwAddr);
+    Serial.printf("Statische IP gesetzt: %s (GW %s)\n", cfgIP.c_str(), gwAddr.toString().c_str());
+  }
+
+  Serial.printf("Verbinde mit WLAN: %s\n", cfgSSID.c_str());
+  WiFi.begin(cfgSSID.c_str(), cfgPass.c_str());
+
+  int timeout = 0;
+  while (WiFi.status() != WL_CONNECTED && timeout < 20) {
+    delay(500);
+    timeout++;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  if (applyAsActiveProfile) {
+    startupSSID = cfgSSID;
+    startupPass = cfgPass;
+    startupStaticIP = cfgIP;
+  }
+  Serial.printf("WLAN OK! IP: %s\n", WiFi.localIP().toString().c_str());
+  return true;
 }
 
 void checkTimeValid() {
@@ -328,6 +365,39 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
 
   uint32_t impulseBlock = empfangen.zaehler;
 
+  // Druckstoss-Filter fuer Hauptwasseruhr:
+  // Einzelne, zeitlich isolierte Kleinimpulse werden als Stoerung verworfen.
+  if (idx == 0 && impulseBlock > 0) {
+    const unsigned long nowMs = millis();
+    const unsigned long FILTER_WINDOW_MS = 6000UL;
+    const uint32_t FILTER_IMMEDIATE_BLOCK = 3;
+
+    if (hauptPendingImpulse > 0 && (nowMs - hauptPendingSince > FILTER_WINDOW_MS)) {
+      Serial.printf("Stoerimpuls verworfen (Hauptwasseruhr): %lu\n", hauptPendingImpulse);
+      hauptPendingImpulse = 0;
+      hauptPendingSince = 0;
+    }
+
+    const bool closeInTime =
+      (hauptLastRecvMillis > 0) &&
+      (nowMs - hauptLastRecvMillis <= FILTER_WINDOW_MS);
+    hauptLastRecvMillis = nowMs;
+
+    if (impulseBlock >= FILTER_IMMEDIATE_BLOCK || closeInTime) {
+      if (hauptPendingImpulse > 0) {
+        impulseBlock += hauptPendingImpulse;
+        Serial.printf("Bestaetigter Fluss (Hauptwasseruhr): +%lu Impulse\n", hauptPendingImpulse);
+        hauptPendingImpulse = 0;
+        hauptPendingSince = 0;
+      }
+    } else {
+      hauptPendingImpulse += impulseBlock;
+      hauptPendingSince = nowMs;
+      Serial.printf("Impuls geparkt (Hauptwasseruhr): +%lu\n", impulseBlock);
+      return;
+    }
+  }
+
   peers[idx].zaehler += impulseBlock;
   peers[idx].online = true;
   peers[idx].neuerWert = true;
@@ -377,6 +447,51 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
 
   logToSD(idx, impulseBlock, peers[idx].zaehler);
   saveCounterState();
+}
+
+// ===== WLAN Reconnect =====
+void checkAndReconnectWiFi() {
+  static unsigned long lastCheckMs = 0;
+  static unsigned long disconnectSince = 0;
+  static bool wasConnected = false;
+
+  const unsigned long CHECK_INTERVAL_MS  = 15000UL; // alle 15 Sek. pruefen
+  const unsigned long RECONNECT_DELAY_MS = 10000UL; // erst nach 10 Sek. Ausfall reconnecten
+
+  unsigned long now = millis();
+  if (now - lastCheckMs < CHECK_INTERVAL_MS) return;
+  lastCheckMs = now;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wasConnected = true;
+    disconnectSince = 0;
+    return;
+  }
+
+  // Verbindung verloren
+  if (wasConnected && disconnectSince == 0) {
+    disconnectSince = now;
+    Serial.println("WLAN-Verbindung verloren, warte vor Reconnect...");
+    return;
+  }
+
+  if (disconnectSince > 0 && (now - disconnectSince >= RECONNECT_DELAY_MS)) {
+    bool connected = connectWiFiProfile(startupSSID, startupPass, startupStaticIP, false);
+    if (!connected) {
+      Serial.println("Reconnect Primärprofil fehlgeschlagen, versuche WLAN2...");
+      connected = connectWiFiProfile(String(fallbackSSID), String(fallbackPass), String(fallbackIP), true);
+    }
+
+    if (connected) {
+      Serial.printf("Reconnect aktiv mit SSID: %s\n", startupSSID.c_str());
+      wasConnected = true;
+      disconnectSince = 0;
+      checkTimeValid();
+    } else {
+      Serial.println("Reconnect fehlgeschlagen, naechster Versuch in 15 Sek.");
+      disconnectSince = now; // neu starten
+    }
+  }
 }
 
 void checkDauerlaufAlarm() {
@@ -445,23 +560,14 @@ void initSDCard() {
 }
 
 void initWiFiAndTime() {
-  WiFi.mode(WIFI_AP_STA);
-  IPAddress ipAddr, gwAddr, subnet(255, 255, 255, 0);
-  if (isValidIPv4(startupStaticIP) && gwAddr.fromString(gatewayFromIP(startupStaticIP)) && ipAddr.fromString(startupStaticIP)) {
-    WiFi.config(ipAddr, gwAddr, subnet, gwAddr);
-    Serial.printf("Statische IP gesetzt: %s (GW %s)\n", startupStaticIP.c_str(), gwAddr.toString().c_str());
-  }
-  Serial.printf("Verbinde mit WLAN: %s\n", startupSSID.c_str());
-  WiFi.begin(startupSSID.c_str(), startupPass.c_str());
-
-  int timeout = 0;
-  while (WiFi.status() != WL_CONNECTED && timeout < 20) {
-    delay(500);
-    timeout++;
+  bool connected = connectWiFiProfile(startupSSID, startupPass, startupStaticIP, false);
+  if (!connected) {
+    Serial.println("Primaeres WLAN fehlgeschlagen, versuche WLAN2...");
+    connected = connectWiFiProfile(String(fallbackSSID), String(fallbackPass), String(fallbackIP), true);
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("WLAN OK! IP: %s\n", WiFi.localIP().toString().c_str());
+  if (connected) {
+    Serial.printf("Aktives WLAN-Profil: %s\n", startupSSID.c_str());
 
     configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
 

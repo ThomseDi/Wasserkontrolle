@@ -1,8 +1,6 @@
 #include "display.h"
 #include "logic.h"
 
-#define FW_VERSION "v1.05"
-
 // ===== Touch lesen =====
 bool getTouch(int &tx, int &ty) {
   TS_Point p = ts.getPoint();
@@ -84,6 +82,13 @@ void drawMainPage() {
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString("WasserKontrolle " FW_VERSION, 160, 2);
 
+  const bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextFont(1);
+  tft.setTextColor(wifiConnected ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
+  tft.drawString(wifiConnected ? "WLAN OK" : "WLAN RECON", 315, 4);
+  tft.fillCircle(318, 12, 2, wifiConnected ? TFT_GREEN : TFT_ORANGE);
+
   drawBtnBig(5,   20, 60, 28, "OFFSET",  TFT_PURPLE);
   drawBtnBig(70,  20, 60, 28, "NOTIZ",   0x0400);
   drawBtnBig(135, 20, 60, 28, "DATEIEN", 0x000A);
@@ -137,6 +142,16 @@ void drawMainPage() {
 }
 
 void updatePeerStatus() {
+  const bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+
+  // WLAN-Status oben rechts live aktualisieren
+  tft.fillRect(235, 0, 85, 16, TFT_BLACK);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextFont(1);
+  tft.setTextColor(wifiConnected ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
+  tft.drawString(wifiConnected ? "WLAN OK" : "WLAN RECON", 315, 4);
+  tft.fillCircle(318, 12, 2, wifiConnected ? TFT_GREEN : TFT_ORANGE);
+
   for (int i = 0; i < 3; i++) {
     int y = 56 + i * 55;
     bool isOnline = peerIsOnline(i);
@@ -163,6 +178,11 @@ void updatePeerStatus() {
   tft.setTextFont(1);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.drawString(getTimeString(), 160, 225);
+
+  // IP unten links live aktualisieren
+  tft.fillRect(0, 225, 160, 10, TFT_BLACK);
+  tft.setTextColor(wifiConnected ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
+  tft.drawString(wifiConnected ? ("IP: " + WiFi.localIP().toString()) : "WLAN nicht verbunden", 5, 225);
 }
 
 void drawOffsetPage() {

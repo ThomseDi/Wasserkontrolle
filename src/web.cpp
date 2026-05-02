@@ -3,6 +3,10 @@
 
 void handleRoot() {
   String zeitstempel = getTimeString();
+  bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+  String wifiStatus = wifiConnected ? "WLAN OK" : "WLAN RECONNECT";
+  String wifiIp = wifiConnected ? WiFi.localIP().toString() : "-";
+  String badgeClass = wifiConnected ? "badgeOk" : "badgeWarn";
 
   String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
     "<meta http-equiv='refresh' content='5'>"
@@ -25,12 +29,23 @@ void handleRoot() {
     ".btn1{background:#1f6feb;color:white}"
     ".btn2{background:#0f766e;color:white}"
     ".btn3{background:#b91c1c;color:white}"
+    ".meta{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:16px}"
+    ".badge{padding:6px 10px;border-radius:10px;font-size:0.9em}"
+    ".badgeOk{background:#0f5132;color:#9ff0c1}"
+    ".badgeWarn{background:#664d03;color:#ffec99}"
+    ".badgeInfo{background:#22324a;color:#a9d0ff}"
     ".foot{text-align:center;color:#666;font-size:0.85em;margin-top:30px}"
     "</style></head><body>";
 
   html += "<div class='wrap'>";
   html += "<h1>&#128167; WasserKontrolle</h1>";
   html += "<div class='sub'>Stand: " + zeitstempel + "</div>";
+  html += "<div class='meta'>";
+  html += "<div class='badge badgeInfo'>Version: " FW_VERSION "</div>";
+  html += "<div class='badge " + badgeClass + "'>" + wifiStatus + "</div>";
+  html += "<div class='badge badgeInfo'>SSID: " + startupSSID + "</div>";
+  html += "<div class='badge badgeInfo'>IP: " + wifiIp + "</div>";
+  html += "</div>";
 
   for (int i = 0; i < 3; i++) {
     bool isOnline = peerIsOnline(i);
@@ -53,7 +68,7 @@ void handleRoot() {
   html += "<a class='btn btn3' href='/clearlog' onclick=\"return confirm('Wasserlog wirklich loeschen?');\">Log loeschen</a>";
   html += "</div>";
 
-  html += "<div class='foot'>Auto-Refresh 5s | IP: " + WiFi.localIP().toString() + "</div>";
+  html += "<div class='foot'>Auto-Refresh 5s | Firmware " FW_VERSION "</div>";
   html += "</div></body></html>";
 
   server.send(200, "text/html", html);
