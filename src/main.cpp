@@ -31,6 +31,15 @@ static void drawStartupProfilePage() {
   tft.drawString("Tippe auf PROFIL 1 oder PROFIL 2.", 12, 164);
 }
 
+static void drawStartupStatus(const char* msg, uint16_t color = TFT_YELLOW) {
+  tft.fillRect(0, 206, 320, 34, TFT_BLACK);
+  tft.drawFastHLine(0, 205, 320, TFT_DARKGREY);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(1);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.drawString(msg, 6, 216);
+}
+
 void setup() {
   delay(2000);
   Serial.begin(115200);
@@ -41,7 +50,10 @@ void setup() {
 
   // Pflichtschritt 0: WLAN-Profil am TFT auswaehlen
   drawStartupProfilePage();
+  drawStartupStatus("Warte auf Profilwahl (Auto Profil 1 in 10s)...");
   bool profileSelected = false;
+  const unsigned long startupInputTimeoutMs = 10000UL;
+  const unsigned long profileAutoSelectMs = millis();
   while (!profileSelected) {
     int tx, ty;
     if (getTouch(tx, ty) && millis() - lastTouch > 200) {
@@ -59,6 +71,15 @@ void setup() {
         profileSelected = true;
       }
     }
+
+    if (!profileSelected && (millis() - profileAutoSelectMs >= startupInputTimeoutMs)) {
+      startupSSID = "MOSTKRUG2.4";
+      startupPass = "mostkrug2025";
+      startupStaticIP = "192.168.2.75";
+      profileSelected = true;
+      Serial.println("Kein Touch in 10s: Auto-Profil 1 gewaehlt");
+      drawStartupStatus("Auto: Profil 1 ausgewaehlt", TFT_GREEN);
+    }
     delay(20);
   }
 
@@ -69,12 +90,20 @@ void setup() {
   currentPage = PAGE_KEYBOARD;
   inputText = startupSSID;
   drawKeyboardPage();
+  drawStartupStatus("WLAN-Name eingeben (Auto-Weiter in 10s)...");
+  const unsigned long ssidInputStartMs = millis();
 
   while (keyboardContext == KBCTX_STARTUP_SSID) {
     int tx, ty;
     if (getTouch(tx, ty) && millis() - lastTouch > 200) {
       lastTouch = millis();
       handleKeyboardPage(tx, ty);
+    }
+    if (keyboardContext == KBCTX_STARTUP_SSID && (millis() - ssidInputStartMs >= startupInputTimeoutMs)) {
+      keyboardContext = KBCTX_NONE;
+      Serial.println("Kein Touch in 10s: SSID unveraendert uebernommen");
+      drawStartupStatus("Auto: SSID unveraendert uebernommen", TFT_GREEN);
+      break;
     }
     delay(20);
   }
@@ -86,12 +115,20 @@ void setup() {
   currentPage = PAGE_KEYBOARD;
   inputText = startupPass;
   drawKeyboardPage();
+  drawStartupStatus("WLAN-Passwort eingeben (Auto-Weiter in 10s)...");
+  const unsigned long passInputStartMs = millis();
 
   while (keyboardContext == KBCTX_STARTUP_PASS) {
     int tx, ty;
     if (getTouch(tx, ty) && millis() - lastTouch > 200) {
       lastTouch = millis();
       handleKeyboardPage(tx, ty);
+    }
+    if (keyboardContext == KBCTX_STARTUP_PASS && (millis() - passInputStartMs >= startupInputTimeoutMs)) {
+      keyboardContext = KBCTX_NONE;
+      Serial.println("Kein Touch in 10s: Passwort unveraendert uebernommen");
+      drawStartupStatus("Auto: Passwort unveraendert uebernommen", TFT_GREEN);
+      break;
     }
     delay(20);
   }
@@ -102,12 +139,20 @@ void setup() {
   currentPage = PAGE_KEYBOARD;
   inputText = startupStaticIP;
   drawNumberPage();
+  drawStartupStatus("Start-IP eingeben (Auto-Weiter in 10s)...");
+  const unsigned long ipInputStartMs = millis();
 
   while (keyboardContext == KBCTX_STARTUP_IP) {
     int tx, ty;
     if (getTouch(tx, ty) && millis() - lastTouch > 200) {
       lastTouch = millis();
       handleKeyboardPage(tx, ty);
+    }
+    if (keyboardContext == KBCTX_STARTUP_IP && (millis() - ipInputStartMs >= startupInputTimeoutMs)) {
+      keyboardContext = KBCTX_NONE;
+      Serial.println("Kein Touch in 10s: Start-IP unveraendert uebernommen");
+      drawStartupStatus("Auto: Start-IP unveraendert uebernommen", TFT_GREEN);
+      break;
     }
     delay(20);
   }

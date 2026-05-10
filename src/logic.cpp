@@ -69,6 +69,10 @@ static unsigned long lastDauerlaufAlarmMillis = 0;
 static uint32_t hauptPendingImpulse = 0;
 static unsigned long hauptPendingSince = 0;
 static unsigned long hauptLastRecvMillis = 0;
+static unsigned long hauptLastAcceptedBlockMs = 0;
+static uint32_t entkalkerPendingImpulse = 0;
+static unsigned long entkalkerPendingSince = 0;
+static unsigned long entkalkerLastRecvMillis = 0;
 
 // ===== Entkalker-Alarm =====
 const char* ENTKALKER_FILE = "/entkalker.csv";
@@ -371,6 +375,7 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
     const unsigned long nowMs = millis();
     const unsigned long FILTER_WINDOW_MS = 6000UL;
     const uint32_t FILTER_IMMEDIATE_BLOCK = 3;
+    const unsigned long MIN_VALID_PULSE_INTERVAL_MS = 300UL;
 
     if (hauptPendingImpulse > 0 && (nowMs - hauptPendingSince > FILTER_WINDOW_MS)) {
       Serial.printf("Stoerimpuls verworfen (Hauptwasseruhr): %lu\n", hauptPendingImpulse);
@@ -396,16 +401,70 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
       Serial.printf("Impuls geparkt (Hauptwasseruhr): +%lu\n", impulseBlock);
       return;
     }
+
+    // Grober Master-Filter ohne Slave-Anpassung:
+    // maximal 1 Impuls je 300 ms im seit dem letzten akzeptierten Block verstrichenen Fenster.
+    unsigned long elapsedMs = (hauptLastAcceptedBlockMs == 0) ? 1000UL : (nowMs - hauptLastAcceptedBlockMs);
+    if (elapsedMs < MIN_VALID_PULSE_INTERVAL_MS) elapsedMs = MIN_VALID_PULSE_INTERVAL_MS;
+
+    uint32_t maxAllowed = elapsedMs / MIN_VALID_PULSE_INTERVAL_MS;
+    if (maxAllowed == 0) maxAllowed = 1;
+
+    if (impulseBlock > maxAllowed) {
+      Serial.printf("Impulsblock begrenzt (Hauptwasseruhr): %lu -> %lu (Fenster %lums)\n",
+                    impulseBlock,
+                    maxAllowed,
+                    elapsedMs);
+      impulseBlock = maxAllowed;
+    }
+
+    hauptLastAcceptedBlockMs = nowMs;
   }
 
-  peers[idx].zaehler += impulseBlock;
+  // Druckstoss-Filter fuer Entkalkeruhr:
+  // Einzelne, zeitlich isolierte Kleinimpulse werden als Stoerung verworfen.
+  if (idx == 1 && impulseBlock > 0) {
+    const unsigned long nowMs = millis();
+    const unsigned long FILTER_WINDOW_MS = 6000UL;
+    const uint32_t FILTER_IMMEDIATE_BLOCK = 3;
+
+    if (entkalkerPendingImpulse > 0 && (nowMs - entkalkerPendingSince > FILTER_WINDOW_MS)) {
+      Serial.printf("Stoerimpuls verworfen (Entkalkeruhr): %lu\n", entkalkerPendingImpulse);
+      entkalkerPendingImpulse = 0;
+      entkalkerPendingSince = 0;
+    }
+
+    const bool closeInTime =
+      (entkalkerLastRecvMillis > 0) &&
+      (nowMs - entkalkerLastRecvMillis <= FILTER_WINDOW_MS);
+    entkalkerLastRecvMillis = nowMs;
+
+    if (impulseBlock >= FILTER_IMMEDIATE_BLOCK || closeInTime) {
+      if (entkalkerPendingImpulse > 0) {
+        impulseBlock += entkalkerPendingImpulse;
+        Serial.printf("Bestaetigter Fluss (Entkalkeruhr): +%lu Impulse\n", entkalkerPendingImpulse);
+        entkalkerPendingImpulse = 0;
+        entkalkerPendingSince = 0;
+      }
+    } else {
+      entkalkerPendingImpulse += impulseBlock;
+      entkalkerPendingSince = nowMs;
+      Serial.printf("Impuls geparkt (Entkalkeruhr): +%lu\n", impulseBlock);
+      return;
+    }
+  }
+
+  uint32_t literDelta = impulseBlock;
+
+  peers[idx].zaehler += literDelta;
   peers[idx].online = true;
   peers[idx].neuerWert = true;
   peers[idx].lastSeen = millis();
 
-  Serial.printf("Empfangen von %s: +%lu Impulse, Gesamt=%lu Liter\n",
+  Serial.printf("Empfangen von %s: +%lu Impulse, +%lu L, Gesamt=%lu Liter\n",
                 peers[idx].name,
                 impulseBlock,
+                literDelta,
                 peers[idx].zaehler);
 
   // Dauerlauf-Tracking für Hauptwasseruhr (Peer 0)

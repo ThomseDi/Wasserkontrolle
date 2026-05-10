@@ -1,5 +1,6 @@
 #include "display.h"
 #include "logic.h"
+#include "notification.h"
 
 // ===== Touch lesen =====
 bool getTouch(int &tx, int &ty) {
@@ -76,12 +77,17 @@ void drawWrappedText(String text, int x, int y, int maxW, uint16_t color) {
 void drawMainPage() {
   tft.fillScreen(TFT_BLACK);
 
-  tft.setTextDatum(TC_DATUM);
+  // Links oben: WasserKontrolle
+  tft.setTextDatum(TL_DATUM);
   tft.setTextSize(1);
   tft.setTextFont(2);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("WasserKontrolle " FW_VERSION, 160, 2);
+  tft.drawString("WasserKontrolle " FW_VERSION, 5, 2);
 
+  // Direkt hinter dem Titeltext: PUSH Button
+  drawBtn(170, 2, 50, 14, "PUSH", 0x7800);
+
+  // Rechts oben: WLAN Status
   const bool wifiConnected = (WiFi.status() == WL_CONNECTED);
   tft.setTextDatum(TR_DATUM);
   tft.setTextFont(1);
@@ -211,12 +217,15 @@ void drawOffsetPage() {
   drawBtn(190, 120, 55, 26, "DEL", TFT_ORANGE);
   drawBtn(255, 120, 55, 26, "CLR", TFT_BLUE);
 
+  // Ziffern im Offset-Block kleiner darstellen, damit auch "0" sauber sichtbar bleibt.
+  tft.setTextFont(1);
+
   const char* nums = "123456789";
   int startX = 60;
-  int startY = 160;
+  int startY = 150;
   int w = 55;
-  int h = 24;
-  int gap = 8;
+  int h = 18;
+  int gap = 4;
 
   int idx = 0;
   for (int row = 0; row < 3; row++) {
@@ -258,6 +267,16 @@ void handleMainPage(int tx, int ty) {
     currentPage = PAGE_ENTKALKER;
     return;
   }
+
+  if (btnHit(170, 2, 50, 14, tx, ty)) {
+    static unsigned long lastPushButtonMs = 0;
+    unsigned long nowMs = millis();
+    if (nowMs - lastPushButtonMs >= 500) {  // Debounce: min. 500ms zwischen Klicks
+      sendPushover("TEST: Push manuell vom Display ausgeloest (" FW_VERSION ")");
+      lastPushButtonMs = nowMs;
+    }
+    return;
+  }
 }
 
 void handleOffsetPage(int tx, int ty) {
@@ -290,10 +309,10 @@ void handleOffsetPage(int tx, int ty) {
   }
 
   int startX = 60;
-  int startY = 160;
+  int startY = 150;
   int w = 55;
-  int h = 24;
-  int gap = 8;
+  int h = 18;
+  int gap = 4;
 
   int digit = 1;
   for (int row = 0; row < 3; row++) {
