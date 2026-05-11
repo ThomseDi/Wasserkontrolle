@@ -26,21 +26,26 @@ struct WasserDaten {
   uint32_t pulseCount;
 };
 
+// ===== Debouncing Parameter =====
+#define MIN_PULSE_INTERVAL_MS 300  // Mindestverzögerung zwischen Impulsen
+#define STABLE_TIME_MS 20          // Signal muss mind. 20 ms stabil sein
+
 // ===== Impulszähler =====
 volatile uint32_t pulseCount = 0;
-volatile unsigned long lastPulseTime = 0;
+volatile unsigned long lastValidPulseTime = 0;
 
 uint32_t lastSentCount = 0;
 unsigned long lastSendTime = 0;
 
 // ===== Interrupt =====
 void IRAM_ATTR onPulse() {
-  unsigned long now = micros();
+  unsigned long now = millis();
 
-  // Entprellung (5 ms)
-  if (now - lastPulseTime > 5000) {
+  // Nur zählen wenn Mindestverzögerung eingehalten ist
+  // 300 ms ist lang genug, dass 20 ms Stabilität implizit erfüllt ist
+  if (now - lastValidPulseTime >= MIN_PULSE_INTERVAL_MS) {
     pulseCount++;
-    lastPulseTime = now;
+    lastValidPulseTime = now;
   }
 }
 
