@@ -435,10 +435,8 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
         hauptPendingSince = 0;
       }
     } else {
-      hauptPendingImpulse += impulseBlock;
-      hauptPendingSince = nowMs;
-      Serial.printf("Impuls geparkt (Hauptwasseruhr): +%lu\n", impulseBlock);
-      return;
+      // Isolierte Einzelimpulse nicht verwerfen, sonst bleibt der Literzaehler stehen.
+      Serial.printf("Einzelimpuls direkt akzeptiert (Hauptwasseruhr): +%lu\n", impulseBlock);
     }
 
     // Grober Master-Filter ohne Slave-Anpassung:
@@ -486,10 +484,8 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
         entkalkerPendingSince = 0;
       }
     } else {
-      entkalkerPendingImpulse += impulseBlock;
-      entkalkerPendingSince = nowMs;
-      Serial.printf("Impuls geparkt (Entkalkeruhr): +%lu\n", impulseBlock);
-      return;
+      // Auch beim Entkalker keine isolierten Impulse verlieren.
+      Serial.printf("Einzelimpuls direkt akzeptiert (Entkalkeruhr): +%lu\n", impulseBlock);
     }
   }
 

@@ -10,7 +10,7 @@
 #include <SD.h>
 #include <TFT_eSPI.h>
 
-#define FW_VERSION "v1.14"
+#define FW_VERSION "v1.15"
 
 // ===== Pins =====
 #define TFT_BL     21

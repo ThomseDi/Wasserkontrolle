@@ -12,9 +12,9 @@ void initOTA() {
   });
 
   ArduinoOTA.onEnd([]() {
-    Serial.println("OTA Ende - Neustart...");
-    delay(500);
-    ESP.restart();
+    // Kein manuelles Restart hier: ESP32-OTA beendet den Vorgang selbst,
+    // sonst kann der finale OK-Handshake zum Uploader abbrechen.
+    Serial.println("OTA Ende");
   });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
