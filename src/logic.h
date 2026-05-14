@@ -11,6 +11,8 @@ void addPeer(uint8_t *mac);
 int nextFileNumber();
 bool isValidIPv4(const String &ip);
 String gatewayFromIP(const String &ip);
+bool loadStartupConfig();
+void saveStartupConfig();
 
 // Zähler / SD
 void ensureCounterFile();

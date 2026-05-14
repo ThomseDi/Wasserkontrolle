@@ -48,113 +48,16 @@ void setup() {
 
   initDisplayAndTouch();
 
-  // Pflichtschritt 0: WLAN-Profil am TFT auswaehlen
-  drawStartupProfilePage();
-  drawStartupStatus("Warte auf Profilwahl (Auto Profil 1 in 10s)...");
-  bool profileSelected = false;
-  const unsigned long startupInputTimeoutMs = 10000UL;
-  const unsigned long profileAutoSelectMs = millis();
-  while (!profileSelected) {
-    int tx, ty;
-    if (getTouch(tx, ty) && millis() - lastTouch > 200) {
-      lastTouch = millis();
+  const bool startupConfigLoaded = loadStartupConfig();
 
-      if (btnHit(15, 40, 140, 45, tx, ty)) {
-        startupSSID = "MOSTKRUG2.4";
-        startupPass = "mostkrug2025";
-        startupStaticIP = "192.168.2.75";
-        profileSelected = true;
-      } else if (btnHit(165, 40, 140, 45, tx, ty)) {
-        startupSSID = "6360Achalmstr";
-        startupPass = "mostkrug2011";
-        startupStaticIP = "192.168.1.187";
-        profileSelected = true;
-      }
-    }
-
-    if (!profileSelected && (millis() - profileAutoSelectMs >= startupInputTimeoutMs)) {
-      startupSSID = "MOSTKRUG2.4";
-      startupPass = "mostkrug2025";
-      startupStaticIP = "192.168.2.75";
-      profileSelected = true;
-      Serial.println("Kein Touch in 10s: Auto-Profil 1 gewaehlt");
-      drawStartupStatus("Auto: Profil 1 ausgewaehlt", TFT_GREEN);
-    }
-    delay(20);
-  }
-
-  // Pflichtschritt 1: WLAN-Name eingeben
-  keyboardContext = KBCTX_STARTUP_SSID;
-  numMode = false;
-  shiftOn = false;
-  currentPage = PAGE_KEYBOARD;
-  inputText = startupSSID;
-  drawKeyboardPage();
-  drawStartupStatus("WLAN-Name eingeben (Auto-Weiter in 10s)...");
-  const unsigned long ssidInputStartMs = millis();
-
-  while (keyboardContext == KBCTX_STARTUP_SSID) {
-    int tx, ty;
-    if (getTouch(tx, ty) && millis() - lastTouch > 200) {
-      lastTouch = millis();
-      handleKeyboardPage(tx, ty);
-    }
-    if (keyboardContext == KBCTX_STARTUP_SSID && (millis() - ssidInputStartMs >= startupInputTimeoutMs)) {
-      keyboardContext = KBCTX_NONE;
-      Serial.println("Kein Touch in 10s: SSID unveraendert uebernommen");
-      drawStartupStatus("Auto: SSID unveraendert uebernommen", TFT_GREEN);
-      break;
-    }
-    delay(20);
-  }
-
-  // Pflichtschritt 2: WLAN-Passwort eingeben
-  keyboardContext = KBCTX_STARTUP_PASS;
-  numMode = false;
-  shiftOn = false;
-  currentPage = PAGE_KEYBOARD;
-  inputText = startupPass;
-  drawKeyboardPage();
-  drawStartupStatus("WLAN-Passwort eingeben (Auto-Weiter in 10s)...");
-  const unsigned long passInputStartMs = millis();
-
-  while (keyboardContext == KBCTX_STARTUP_PASS) {
-    int tx, ty;
-    if (getTouch(tx, ty) && millis() - lastTouch > 200) {
-      lastTouch = millis();
-      handleKeyboardPage(tx, ty);
-    }
-    if (keyboardContext == KBCTX_STARTUP_PASS && (millis() - passInputStartMs >= startupInputTimeoutMs)) {
-      keyboardContext = KBCTX_NONE;
-      Serial.println("Kein Touch in 10s: Passwort unveraendert uebernommen");
-      drawStartupStatus("Auto: Passwort unveraendert uebernommen", TFT_GREEN);
-      break;
-    }
-    delay(20);
-  }
-
-  // Pflichtschritt 3: statische IP eingeben
-  keyboardContext = KBCTX_STARTUP_IP;
-  numMode = true;
-  currentPage = PAGE_KEYBOARD;
-  inputText = startupStaticIP;
-  drawNumberPage();
-  drawStartupStatus("Start-IP eingeben (Auto-Weiter in 10s)...");
-  const unsigned long ipInputStartMs = millis();
-
-  while (keyboardContext == KBCTX_STARTUP_IP) {
-    int tx, ty;
-    if (getTouch(tx, ty) && millis() - lastTouch > 200) {
-      lastTouch = millis();
-      handleKeyboardPage(tx, ty);
-    }
-    if (keyboardContext == KBCTX_STARTUP_IP && (millis() - ipInputStartMs >= startupInputTimeoutMs)) {
-      keyboardContext = KBCTX_NONE;
-      Serial.println("Kein Touch in 10s: Start-IP unveraendert uebernommen");
-      drawStartupStatus("Auto: Start-IP unveraendert uebernommen", TFT_GREEN);
-      break;
-    }
-    delay(20);
+  if (startupConfigLoaded) {
+    drawStartupStatus("Gespeicherte WLAN-Daten geladen", TFT_GREEN);
+  } else {
+    startupSSID = "MOSTKRUG2.4";
+    startupPass = "mostkrug2025";
+    startupStaticIP = "192.168.2.75";
+    saveStartupConfig();
+    drawStartupStatus("Keine gespeicherten Daten - Profil 1 geladen", TFT_GREEN);
   }
 
   initSDCard();
@@ -219,18 +122,22 @@ void loop() {
     }
   }
 
-  static unsigned long lastUpdate = 0;
-  if (currentPage == PAGE_MAIN && millis() - lastUpdate > 2000) {
-    lastUpdate = millis();
+  static unsigned long lastPeerPing = 0;
+  static unsigned long lastMainRefresh = 0;
+
+  if (currentPage == PAGE_MAIN && millis() - lastMainRefresh > 250) {
+    lastMainRefresh = millis();
+    updatePeerStatus();
+  }
+
+  if (currentPage == PAGE_MAIN && millis() - lastPeerPing > 2000) {
+    lastPeerPing = millis();
 
     uint8_t ping = 1;
     for (int i = 0; i < 3; i++) {
       esp_now_send(peers[i].mac, &ping, sizeof(ping));
       delay(20);
     }
-
-    delay(100);
-    updatePeerStatus();
   }
 
   delay(50);

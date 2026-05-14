@@ -5,3 +5,5 @@ void handleRoot();
 void handleLogPage();
 void handleDownloadCSV();
 void handleClearLog();
+void handleResetCounter();
+void handleResetEntkalker();

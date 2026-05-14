@@ -66,6 +66,8 @@ void handleRoot() {
   html += "<a class='btn btn1' href='/log'>CSV anzeigen</a>";
   html += "<a class='btn btn2' href='/download'>CSV herunterladen</a>";
   html += "<a class='btn btn3' href='/clearlog' onclick=\"return confirm('Wasserlog wirklich loeschen?');\">Log loeschen</a>";
+  html += "<a class='btn btn3' href='/resetcounter' onclick=\"return confirm('Alle Zaehler auf 0 setzen?');\">Zähler Reset</a>";
+  html += "<a class='btn btn3' href='/resetentkalker' onclick=\"return confirm('Entkalker auf 0 setzen?');\">Entkalker Reset</a>";
   html += "</div>";
 
   html += "<div class='foot'>Auto-Refresh 5s | Firmware " FW_VERSION "</div>";
@@ -143,6 +145,21 @@ void handleClearLog() {
   if (sdOK) {
     clearWaterLog();
   }
+  server.sendHeader("Location", "/", true);
+  server.send(302, "text/plain", "");
+}
+
+void handleResetCounter() {
+  for (int i = 0; i < 3; i++) {
+    peers[i].zaehler = 0;
+  }
+  saveCounterState();
+  server.sendHeader("Location", "/", true);
+  server.send(302, "text/plain", "");
+}
+
+void handleResetEntkalker() {
+  resetEntkalker();
   server.sendHeader("Location", "/", true);
   server.send(302, "text/plain", "");
 }

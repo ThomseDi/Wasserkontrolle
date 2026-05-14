@@ -25,6 +25,45 @@ bool btnHit(int bx, int by, int bw, int bh, int tx, int ty) {
   return (tx >= bx && tx <= bx + bw && ty >= by && ty <= by + bh);
 }
 
+static bool hauptImpulsBlinkt() {
+  if (millis() >= hauptImpulsBlinkUntil) {
+    peers[2].neuerWert = false;
+    return false;
+  }
+  return ((millis() / 250UL) % 2UL) == 0;
+}
+
+static bool mainRowIsOnline(int index) {
+  if (index == 2) return peerIsOnline(0);
+  return peerIsOnline(index);
+}
+
+static void drawPeerValueRow(int index, int y) {
+  if (index == 2) {
+    const bool blinkOn = hauptImpulsBlinkt();
+    const uint16_t bg = blinkOn ? TFT_ORANGE : 0x0010;
+    const uint16_t fg = blinkOn ? TFT_BLACK : TFT_WHITE;
+    char impBuf[24];
+    snprintf(impBuf, sizeof(impBuf), "%lu Imp", peers[index].zaehler);
+
+    tft.fillRect(10, y + 20, 180, 30, TFT_BLACK);
+    tft.fillRoundRect(10, y + 20, 180, 28, 5, bg);
+    tft.drawRoundRect(10, y + 20, 180, 28, 5, TFT_WHITE);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextFont(2);
+    tft.setTextColor(fg, bg);
+    tft.drawString(impBuf, 100, y + 34);
+    return;
+  }
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  char litBuf[20];
+  snprintf(litBuf, sizeof(litBuf), "%lu L", peers[index].zaehler);
+  tft.drawString(litBuf, 10, y + 22);
+}
+
 void drawBtn(int x, int y, int w, int h, const char* label, uint16_t color) {
   tft.fillRoundRect(x, y, w, h, 4, color);
   tft.drawRoundRect(x, y, w, h, 4, TFT_WHITE);
@@ -111,16 +150,13 @@ void drawMainPage() {
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawString(peers[i].name, 10, y);
 
-    bool isOnline = peerIsOnline(i);
+    bool isOnline = mainRowIsOnline(i);
     uint16_t col = isOnline ? TFT_GREEN : TFT_RED;
     tft.fillCircle(300, y + 7, 7, col);
 
-    tft.setTextFont(4);
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    char litBuf[20];
-    snprintf(litBuf, sizeof(litBuf), "%lu L", peers[i].zaehler);
-    tft.drawString(litBuf, 10, y + 22);
+    drawPeerValueRow(i, y);
 
+    tft.setTextDatum(TL_DATUM);
     tft.setTextFont(2);
     tft.setTextColor(col, TFT_BLACK);
     tft.drawString(isOnline ? "ON" : "OFF", 270, y + 26);
@@ -160,20 +196,16 @@ void updatePeerStatus() {
 
   for (int i = 0; i < 3; i++) {
     int y = 56 + i * 55;
-    bool isOnline = peerIsOnline(i);
+    bool isOnline = mainRowIsOnline(i);
     uint16_t col = isOnline ? TFT_GREEN : TFT_RED;
 
     tft.fillCircle(300, y + 7, 7, col);
 
-    tft.fillRect(10, y + 22, 250, 24, TFT_BLACK);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextFont(4);
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    char litBuf[20];
-    snprintf(litBuf, sizeof(litBuf), "%lu L", peers[i].zaehler);
-    tft.drawString(litBuf, 10, y + 22);
+    tft.fillRect(10, y + 20, 250, 30, TFT_BLACK);
+    drawPeerValueRow(i, y);
 
     tft.fillRect(265, y + 26, 35, 16, TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
     tft.setTextFont(2);
     tft.setTextColor(col, TFT_BLACK);
     tft.drawString(isOnline ? "ON" : "OFF", 270, y + 26);
@@ -205,7 +237,8 @@ void drawOffsetPage() {
   tft.drawString(peers[selectedPeer].name, 10, 35);
 
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString("Aktuell: " + String(peers[selectedPeer].zaehler) + " L", 10, 55);
+  const char* unit = (selectedPeer == 2) ? " Imp" : " L";
+  tft.drawString("Aktuell: " + String(peers[selectedPeer].zaehler) + unit, 10, 55);
 
   tft.fillRect(10, 80, 300, 32, TFT_DARKGREY);
   tft.drawRect(10, 80, 300, 32, TFT_WHITE);
@@ -265,6 +298,13 @@ void handleMainPage(int tx, int ty) {
 
   if (btnHit(265, 20, 50, 28, tx, ty)) {
     currentPage = PAGE_ENTKALKER;
+    return;
+  }
+
+  if (btnHit(10, 166, 300, 50, tx, ty)) {
+    selectedPeer = 2; // Haupt Impulse (unterste Zeile)
+    inputText = "";
+    currentPage = PAGE_OFFSET;
     return;
   }
 
@@ -566,6 +606,7 @@ void handleKeyboardPage(int tx, int ty) {
     if (keyboardContext == KBCTX_STARTUP_SSID) {
       if (inputText.length() > 0) {
         startupSSID = inputText;
+        saveStartupConfig();
         keyboardContext = KBCTX_NONE;
         currentPage = PAGE_MAIN;
       } else {
@@ -579,6 +620,7 @@ void handleKeyboardPage(int tx, int ty) {
     }
     if (keyboardContext == KBCTX_STARTUP_PASS) {
       startupPass = inputText;
+      saveStartupConfig();
       keyboardContext = KBCTX_NONE;
       currentPage = PAGE_MAIN;
       return;
@@ -586,6 +628,7 @@ void handleKeyboardPage(int tx, int ty) {
     if (keyboardContext == KBCTX_STARTUP_IP) {
       if (isValidIPv4(inputText)) {
         startupStaticIP = inputText;
+        saveStartupConfig();
         keyboardContext = KBCTX_NONE;
         currentPage = PAGE_MAIN;
       } else {

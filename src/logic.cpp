@@ -1,6 +1,7 @@
 #include "logic.h"
 #include "web.h"
 #include "notification.h"
+#include <Preferences.h>
 
 // ===== Definitionen globaler Variablen =====
 const char* ssid     = "MOSTKRUG2.4";
@@ -57,8 +58,10 @@ uint8_t mac_offen[]     = {0xE0, 0x8C, 0xFE, 0xB6, 0xEB, 0x34};
 PeerInfo peers[3] = {
   {"Hauptwasseruhr", mac_haupt, false, 0, false, 0},
   {"Entkalkeruhr",   mac_entkalker, false, 0, false, 0},
-  {"(offen)",        mac_offen, false, 0, false, 0}
+  {"Haupt Impulse",  mac_offen, false, 0, false, 0}
 };
+
+unsigned long hauptImpulsBlinkUntil = 0;
 
 unsigned long lastNightAlarmMillis = 0;
 
@@ -133,6 +136,32 @@ String gatewayFromIP(const String &ip) {
   return ip.substring(0, p3) + ".1";
 }
 
+bool loadStartupConfig() {
+  Preferences prefs;
+  if (!prefs.begin("wksetup", true)) return false;
+
+  const bool hasConfig = prefs.getBool("valid", false);
+  if (hasConfig) {
+    startupSSID = prefs.getString("ssid", startupSSID);
+    startupPass = prefs.getString("pass", startupPass);
+    startupStaticIP = prefs.getString("ip", startupStaticIP);
+  }
+
+  prefs.end();
+  return hasConfig;
+}
+
+void saveStartupConfig() {
+  Preferences prefs;
+  if (!prefs.begin("wksetup", false)) return;
+
+  prefs.putBool("valid", true);
+  prefs.putString("ssid", startupSSID);
+  prefs.putString("pass", startupPass);
+  prefs.putString("ip", startupStaticIP);
+  prefs.end();
+}
+
 bool connectWiFiProfile(const String &cfgSSID, const String &cfgPass, const String &cfgIP, bool applyAsActiveProfile) {
   WiFi.disconnect(true);
   delay(200);
@@ -160,6 +189,7 @@ bool connectWiFiProfile(const String &cfgSSID, const String &cfgPass, const Stri
     startupPass = cfgPass;
     startupStaticIP = cfgIP;
   }
+
   Serial.printf("WLAN OK! IP: %s\n", WiFi.localIP().toString().c_str());
   return true;
 }
@@ -203,7 +233,7 @@ void ensureCounterFile() {
       f.println("Sensor;Gesamtstand");
       f.println("Hauptwasseruhr;0");
       f.println("Entkalkeruhr;0");
-      f.println("(offen);0");
+      f.println("Haupt Impulse;0");
       f.close();
     }
   }
@@ -367,12 +397,21 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
   int idx = empfangen.peerID - 2;
   if (idx < 0 || idx >= 3) return;
 
+  if (idx == 2) return;
+
+  const unsigned long nowMs = millis();
+
+  if (idx == 0 && empfangen.zaehler > 0) {
+    peers[2].zaehler += empfangen.zaehler;
+    peers[2].neuerWert = true;
+    hauptImpulsBlinkUntil = nowMs + 2000UL;
+  }
+
   uint32_t impulseBlock = empfangen.zaehler;
 
   // Druckstoss-Filter fuer Hauptwasseruhr:
   // Einzelne, zeitlich isolierte Kleinimpulse werden als Stoerung verworfen.
   if (idx == 0 && impulseBlock > 0) {
-    const unsigned long nowMs = millis();
     const unsigned long FILTER_WINDOW_MS = 6000UL;
     const uint32_t FILTER_IMMEDIATE_BLOCK = 3;
     const unsigned long MIN_VALID_PULSE_INTERVAL_MS = 300UL;
@@ -459,7 +498,11 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
   peers[idx].zaehler += literDelta;
   peers[idx].online = true;
   peers[idx].neuerWert = true;
-  peers[idx].lastSeen = millis();
+  peers[idx].lastSeen = nowMs;
+
+  if (idx == 0) {
+    peers[2].lastSeen = nowMs;
+  }
 
   Serial.printf("Empfangen von %s: +%lu Impulse, +%lu L, Gesamt=%lu Liter\n",
                 peers[idx].name,
@@ -664,6 +707,8 @@ void initWebServer() {
   server.on("/log", handleLogPage);
   server.on("/download", handleDownloadCSV);
   server.on("/clearlog", handleClearLog);
+  server.on("/resetcounter", handleResetCounter);
+  server.on("/resetentkalker", handleResetEntkalker);
   server.begin();
   Serial.println("Webserver OK");
 }

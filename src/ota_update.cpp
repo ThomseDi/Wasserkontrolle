@@ -12,7 +12,9 @@ void initOTA() {
   });
 
   ArduinoOTA.onEnd([]() {
-    Serial.println("OTA Ende");
+    Serial.println("OTA Ende - Neustart...");
+    delay(500);
+    ESP.restart();
   });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {

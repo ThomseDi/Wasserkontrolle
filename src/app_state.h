@@ -10,7 +10,7 @@
 #include <SD.h>
 #include <TFT_eSPI.h>
 
-#define FW_VERSION "v1.12"
+#define FW_VERSION "v1.14"
 
 // ===== Pins =====
 #define TFT_BL     21
@@ -124,6 +124,7 @@ struct PeerInfo {
 };
 
 extern PeerInfo peers[3];
+extern unsigned long hauptImpulsBlinkUntil;
 
 // ===== Datenpaket =====
 struct WasserDaten {
