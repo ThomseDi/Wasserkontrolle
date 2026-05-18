@@ -118,11 +118,34 @@ Jeder Handler verarbeitet Touch-Klicks für genau eine Seite und setzt bei Bedar
 
 ### Wichtige Punkte
 - Impuls-Pin: `GPIO 27`
-- Entprellung: `5 ms`
+- Entprellung: `MIN_PULSE_INTERVAL_MS = 300 ms`
 - Sendeintervall: `1 Sekunde`
 - Peer-Zuordnung: über MAC-Adresse auf PeerID
+- Kanalquelle fuer ESP-NOW: SSID `MOSTKRUG2.4`
+- Automatische Kanal-Nachfuehrung:
+  - periodischer Re-Check alle 5 Minuten
+  - zusaetzlicher Sofort-Check nach mehreren Sendefehlern
 
-## 6) Seiten-/Zustandsmodell
+## 6) Zusammenfassung Gesamtfunktion (Main + Slave)
+
+Das System besteht aus einem zentralen Master (`src/main.cpp`) und mehreren dezentralen Slaves (`src/slave.cpp`) an den Wasserzaehlern.
+
+### Gesamtablauf
+1. Jeder Slave erfasst Impulse lokal am Zaehler per Interrupt und entprellt diese.
+2. Der Slave sendet die seit der letzten Uebertragung neu gezaehlten Impulse per ESP-NOW an den Master.
+3. Der Master sammelt die Daten aller Slaves, rechnet in Liter, setzt Online/Offline-Status und prueft Alarme (z. B. Dauerlauf, Entkalker).
+4. Der Master zeigt Live-Werte auf dem TFT, speichert Daten auf SD (CSV) und stellt sie ueber den Webserver bereit.
+5. Updates am Master erfolgen per OTA; Slaves werden per USB geflasht.
+
+### Rolle der Komponenten
+- Master: Anzeige, Logik, Alarme, Weboberflaeche, SD-Logging, OTA.
+- Slave: robuste Impulsaufnahme, Zaehlung und ESP-NOW-Uebertragung.
+
+### WLAN-/Kanalverhalten
+- ESP-NOW funktioniert nur stabil, wenn Master und Slave auf demselben WLAN-Kanal arbeiten.
+- Slaves orientieren sich an der SSID `MOSTKRUG2.4` und koennen den Kanal bei Aenderungen automatisch nachziehen.
+
+## 7) Seiten-/Zustandsmodell
 
 ### Page-Enum (`src/app_state.h`)
 - `PAGE_MAIN`
@@ -141,4 +164,4 @@ Jeder Handler verarbeitet Touch-Klicks für genau eine Seite und setzt bei Bedar
 
 ---
 
-Stand: 26.04.2026
+Stand: 18.05.2026
