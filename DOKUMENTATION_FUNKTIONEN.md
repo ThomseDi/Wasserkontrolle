@@ -2,6 +2,13 @@
 
 Diese Doku beschreibt die wichtigsten Funktionen im Projekt, mit Fokus auf den Ablauf in `src/main.cpp` und die aufgerufenen Module.
 
+## Schnellstart (5 Punkte)
+1. Router einschalten und warten, bis WLAN stabil ist.
+2. Master starten und WLAN-Status auf dem Display pruefen.
+3. Slaves starten und ONLINE-Status kontrollieren.
+4. Kurz Wasser laufen lassen und Zaehleranstieg pruefen.
+5. Im Browser Live-Status/Log pruefen.
+
 ## 1) Ablauf in `src/main.cpp`
 
 ### setup()
