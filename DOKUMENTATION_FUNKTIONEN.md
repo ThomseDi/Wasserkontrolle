@@ -162,6 +162,37 @@ Das System besteht aus einem zentralen Master (`src/main.cpp`) und mehreren deze
 - `entkalkerVerbrauch`, `entkalkerGrenzwert`, `entkalkerAlarm`
 - `sdOK`, `timeValid`
 
+## 8) Bedienablauf im Alltag
+
+### Normalbetrieb
+1. Router einschalten und stabil laufen lassen.
+2. Master starten.
+3. Slaves starten.
+4. Auf dem Display pruefen, ob alle relevanten Peers ONLINE sind.
+5. Optional im Browser den Live-Status pruefen.
+
+### Funktionstest (kurz)
+1. Kurz Wasser laufen lassen.
+2. Pruefen, ob Literwerte auf dem Master hochzaehlen.
+3. Pruefen, ob Eintrag im SD-Log erscheint.
+4. Pruefen, ob Browseransicht aktualisiert wird.
+
+### Fehlerfall: Slave OFFLINE
+1. WLAN-Status am Master pruefen.
+2. Master und Slave einmal neu starten.
+3. Sicherstellen, dass die Kanalquelle `MOSTKRUG2.4` sichtbar ist.
+4. Wenn weiter OFFLINE: Slave per USB neu flashen und erneut testen.
+
+### Fehlerfall: Keine Logdaten auf SD
+1. SD-Karte und `sdOK` pruefen.
+2. SD-Karte neu einstecken und Master neu starten.
+3. Speicherplatz/Dateizugriff pruefen (CSV vorhanden, nicht schreibgeschuetzt).
+
+### Update-Empfehlung
+1. Master-Updates per OTA einspielen.
+2. Slave-Updates per USB je Geraet einspielen.
+3. Nach Slave-Update kurzen Impulstest durchfuehren.
+
 ---
 
 Stand: 18.05.2026
