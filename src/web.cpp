@@ -7,6 +7,7 @@ void handleRoot() {
   String wifiStatus = wifiConnected ? "WLAN OK" : "WLAN RECONNECT";
   String wifiIp = wifiConnected ? WiFi.localIP().toString() : "-";
   String badgeClass = wifiConnected ? "badgeOk" : "badgeWarn";
+  uint8_t wifiChannel = getWiFiChannel();
 
   String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
     "<meta http-equiv='refresh' content='5'>"
@@ -34,6 +35,12 @@ void handleRoot() {
     ".badgeOk{background:#0f5132;color:#9ff0c1}"
     ".badgeWarn{background:#664d03;color:#ffec99}"
     ".badgeInfo{background:#22324a;color:#a9d0ff}"
+    ".diag{background:#10182b;border:1px solid #2e4369;border-radius:12px;padding:12px 14px;margin:10px 0 16px 0}"
+    ".diagTitle{color:#8fd3ff;font-weight:bold;margin-bottom:8px}"
+    ".diagRow{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:6px 0;border-top:1px solid #243453}"
+    ".diagRow:first-of-type{border-top:none}"
+    ".diagKey{color:#a9d0ff}"
+    ".diagVal{color:#eee;font-weight:bold}"
     ".foot{text-align:center;color:#666;font-size:0.85em;margin-top:30px}"
     "</style></head><body>";
 
@@ -45,6 +52,14 @@ void handleRoot() {
   html += "<div class='badge " + badgeClass + "'>" + wifiStatus + "</div>";
   html += "<div class='badge badgeInfo'>SSID: " + startupSSID + "</div>";
   html += "<div class='badge badgeInfo'>IP: " + wifiIp + "</div>";
+  html += "<div class='badge badgeInfo'>Kanal: " + String(wifiChannel) + "</div>";
+  html += "</div>";
+
+  html += "<div class='diag'>";
+  html += "<div class='diagTitle'>Kanaltest</div>";
+  html += "<div class='diagRow'><div class='diagKey'>Master WLAN-Kanal</div><div class='diagVal'>" + String(wifiChannel) + "</div></div>";
+  html += "<div class='diagRow'><div class='diagKey'>Slave-Kanalquelle</div><div class='diagVal'>MOSTKRUG2.4</div></div>";
+  html += "<div class='diagRow'><div class='diagKey'>Aktive SSID am Main</div><div class='diagVal'>" + startupSSID + "</div></div>";
   html += "</div>";
 
   for (int i = 0; i < 3; i++) {

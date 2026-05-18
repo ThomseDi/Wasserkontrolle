@@ -3,52 +3,146 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
-#define LED_PIN 2  // Onboard-LED (meiste ESP32 DevKits)
-#define ESPNOW_CHANNEL 11  // Kanal des WLAN-Routers
+#define LED_PIN 2
+#define IMPULS_PIN 27
 
-// ===== Empfangs-Callback =====
+const char* routerSSID = "MOSTKRUG2.4";
+
+// ===== MAC Master =====
+uint8_t masterMAC[] = {0xB0, 0xCB, 0xD8, 0xDB, 0x06, 0x04};
+
+// ===== Slave MACs =====
+uint8_t slaveMacs[][6] = {
+  {0xE0, 0x8C, 0xFE, 0x58, 0x5D, 0x7C},
+  {0xE0, 0x8C, 0xFE, 0x59, 0x59, 0x94},
+  {0xE0, 0x8C, 0xFE, 0xB6, 0xEB, 0x34}
+};
+
+uint8_t myPeerID = 0;
+
+// ===== Datenpaket =====
+struct WasserDaten {
+  uint8_t  peerID;
+  uint32_t pulseCount;
+};
+
+// ===== Debouncing Parameter =====
+#define MIN_PULSE_INTERVAL_MS 300  // Mindestverzögerung zwischen Impulsen
+#define STABLE_TIME_MS 20          // Signal muss mind. 20 ms stabil sein
+
+// ===== Impulszähler =====
+volatile uint32_t pulseCount = 0;
+volatile unsigned long lastValidPulseTime = 0;
+
+uint32_t lastSentCount = 0;
+unsigned long lastSendTime = 0;
+
+// ===== Interrupt =====
+void IRAM_ATTR onPulse() {
+  unsigned long now = millis();
+
+  // Nur zählen wenn Mindestverzögerung eingehalten ist
+  // 300 ms ist lang genug, dass 20 ms Stabilität implizit erfüllt ist
+  if (now - lastValidPulseTime >= MIN_PULSE_INTERVAL_MS) {
+    pulseCount++;
+    lastValidPulseTime = now;
+  }
+}
+
+// ===== Empfang =====
 void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
-  // LED kurz blinken bei Empfang
   digitalWrite(LED_PIN, HIGH);
-  delay(50);
+  delay(20);
   digitalWrite(LED_PIN, LOW);
+}
+
+// ===== Senden =====
+void sendeZaehler(uint32_t count) {
+  WasserDaten daten;
+  daten.peerID = myPeerID;
+  daten.pulseCount = count;
+
+  esp_now_send(masterMAC, (uint8_t*)&daten, sizeof(daten));
+
+  Serial.printf("Gesendet: PeerID=%d, Impulse=%lu\n", daten.peerID, daten.pulseCount);
 }
 
 // ===== SETUP =====
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  pinMode(IMPULS_PIN, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(IMPULS_PIN), onPulse, FALLING);
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  // Auf den Kanal des Routers/Masters wechseln
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-  Serial.println("\n=== ESP-NOW Slave ===");
-  Serial.print("MAC: ");  Serial.println(WiFi.macAddress());
+  // Kanal suchen
+  uint8_t channel = 1;
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == routerSSID) {
+      channel = WiFi.channel(i);
+      break;
+    }
+  }
+  WiFi.scanDelete();
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+
+  // MAC erkennen
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+
+  for (int i = 0; i < 3; i++) {
+    if (memcmp(mac, slaveMacs[i], 6) == 0) {
+      myPeerID = i + 2;
+      break;
+    }
+  }
+
+  if (myPeerID == 0) myPeerID = 2;
+
+  Serial.printf("PeerID: %d\n", myPeerID);
 
   if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW Init Fehler!");
+    Serial.println("ESP-NOW Fehler");
     return;
   }
 
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, masterMAC, 6);
+  peerInfo.channel = channel;
+  peerInfo.encrypt = false;
+
+  esp_now_add_peer(&peerInfo);
+
   esp_now_register_recv_cb(onDataRecv);
 
-  Serial.println("Warte auf Ping vom Master...");
-
-  // LED kurz blinken = bereit
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(LED_PIN, HIGH);
-    delay(100);
-    digitalWrite(LED_PIN, LOW);
-    delay(100);
-  }
+  Serial.println("Bereit für echte Impulse");
 }
 
 // ===== LOOP =====
 void loop() {
-  delay(1000);
+
+  uint32_t currentCount;
+
+  noInterrupts();
+  currentCount = pulseCount;
+  interrupts();
+
+  // alle 1 Sekunde senden (wenn neue Impulse da sind)
+  if (millis() - lastSendTime > 1000) {
+
+    if (currentCount != lastSentCount) {
+      uint32_t diff = currentCount - lastSentCount;
+
+      sendeZaehler(diff);
+
+      lastSentCount = currentCount;
+    }
+
+    lastSendTime = millis();
+  }
 }

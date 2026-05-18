@@ -6,7 +6,10 @@
 #define LED_PIN 2
 #define IMPULS_PIN 27
 
-const char* routerSSID = "6360Achalmstr";
+const char* routerSSID = "MOSTKRUG2.4";
+
+const unsigned long CHANNEL_RECHECK_INTERVAL_MS = 300000;
+const uint8_t SEND_FAILURE_THRESHOLD = 3;
 
 // ===== MAC Master =====
 uint8_t masterMAC[] = {0xB0, 0xCB, 0xD8, 0xDB, 0x06, 0x04};
@@ -19,6 +22,10 @@ uint8_t slaveMacs[][6] = {
 };
 
 uint8_t myPeerID = 0;
+uint8_t currentChannel = 1;
+unsigned long lastChannelCheckTime = 0;
+volatile uint8_t consecutiveSendFailures = 0;
+volatile bool forceChannelRescan = false;
 
 // ===== Datenpaket =====
 struct WasserDaten {
@@ -36,6 +43,64 @@ volatile unsigned long lastValidPulseTime = 0;
 
 uint32_t lastSentCount = 0;
 unsigned long lastSendTime = 0;
+
+uint8_t findRouterChannel() {
+  uint8_t channel = 0;
+  int networkCount = WiFi.scanNetworks();
+
+  for (int i = 0; i < networkCount; i++) {
+    if (WiFi.SSID(i) == routerSSID) {
+      channel = WiFi.channel(i);
+      break;
+    }
+  }
+
+  WiFi.scanDelete();
+  return channel;
+}
+
+bool applyEspNowChannel(uint8_t channel) {
+  if (channel == 0) {
+    Serial.println("Router nicht gefunden, Kanal bleibt unveraendert");
+    return false;
+  }
+
+  if (channel == currentChannel) {
+    return true;
+  }
+
+  esp_now_del_peer(masterMAC);
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, masterMAC, 6);
+  peerInfo.channel = channel;
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("ESP-NOW Peer Update Fehler");
+    return false;
+  }
+
+  currentChannel = channel;
+  Serial.printf("Kanal gesetzt: %u\n", currentChannel);
+  return true;
+}
+
+bool refreshChannel(bool forceScan = false) {
+  if (!forceScan && (millis() - lastChannelCheckTime) < CHANNEL_RECHECK_INTERVAL_MS) {
+    return false;
+  }
+
+  lastChannelCheckTime = millis();
+
+  uint8_t foundChannel = findRouterChannel();
+  if (foundChannel == 0) {
+    return false;
+  }
+
+  return applyEspNowChannel(foundChannel);
+}
 
 // ===== Interrupt =====
 void IRAM_ATTR onPulse() {
@@ -56,13 +121,31 @@ void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
   digitalWrite(LED_PIN, LOW);
 }
 
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    consecutiveSendFailures = 0;
+    return;
+  }
+
+  if (consecutiveSendFailures < 255) {
+    consecutiveSendFailures++;
+  }
+
+  if (consecutiveSendFailures >= SEND_FAILURE_THRESHOLD) {
+    forceChannelRescan = true;
+  }
+}
+
 // ===== Senden =====
 void sendeZaehler(uint32_t count) {
   WasserDaten daten;
   daten.peerID = myPeerID;
   daten.pulseCount = count;
 
-  esp_now_send(masterMAC, (uint8_t*)&daten, sizeof(daten));
+  esp_err_t result = esp_now_send(masterMAC, (uint8_t*)&daten, sizeof(daten));
+  if (result != ESP_OK) {
+    Serial.printf("ESP-NOW Sendefehler: %d\n", result);
+  }
 
   Serial.printf("Gesendet: PeerID=%d, Impulse=%lu\n", daten.peerID, daten.pulseCount);
 }
@@ -80,16 +163,12 @@ void setup() {
   WiFi.disconnect();
 
   // Kanal suchen
-  uint8_t channel = 1;
-  int n = WiFi.scanNetworks();
-  for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i) == routerSSID) {
-      channel = WiFi.channel(i);
-      break;
-    }
+  uint8_t channel = findRouterChannel();
+  if (channel == 0) {
+    channel = 1;
   }
-  WiFi.scanDelete();
-  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+  currentChannel = channel;
+  esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
 
   // MAC erkennen
   uint8_t mac[6];
@@ -113,18 +192,26 @@ void setup() {
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, masterMAC, 6);
-  peerInfo.channel = channel;
+  peerInfo.channel = currentChannel;
   peerInfo.encrypt = false;
 
   esp_now_add_peer(&peerInfo);
 
   esp_now_register_recv_cb(onDataRecv);
+  esp_now_register_send_cb(onDataSent);
 
   Serial.println("Bereit für echte Impulse");
 }
 
 // ===== LOOP =====
 void loop() {
+
+  if (forceChannelRescan) {
+    forceChannelRescan = false;
+    refreshChannel(true);
+  } else {
+    refreshChannel(false);
+  }
 
   uint32_t currentCount;
 
